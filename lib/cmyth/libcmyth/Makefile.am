@@ -23,9 +23,10 @@ libcmyth_la_SOURCES = bookmark.c \
                      utf8tolatin1.c \
                      recordingrule.c \
                      channel.c \
-                     storagegroup.c
+                     storagegroup.c \
+                     epginfo.c
 
-INCLUDES=-I../include/ $(MYSQL_INCLUDES)
+INCLUDES=-I$(srcdir)/../include/ $(MYSQL_INCLUDES)
 
 $(LIB): libcmyth.la
 	cp -f .libs/libcmyth.a .
