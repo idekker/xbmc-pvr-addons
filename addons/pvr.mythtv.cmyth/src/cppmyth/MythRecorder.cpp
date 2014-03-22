@@ -22,6 +22,7 @@
 #include "MythProgramInfo.h"
 #include "MythChannel.h"
 #include "MythPointer.h"
+#include "MythFile.h"
 #include "../client.h"
 
 using namespace ADDON;
@@ -30,6 +31,7 @@ MythRecorder::MythRecorder()
   : m_recorder_t(new MythPointerThreadSafe<cmyth_recorder_t>())
   , m_liveChainUpdated(new int(0))
   , m_conn()
+  , m_liveRecording(false)
 {
 }
 
@@ -37,6 +39,7 @@ MythRecorder::MythRecorder(cmyth_recorder_t cmyth_recorder, const MythConnection
   : m_recorder_t(new MythPointerThreadSafe<cmyth_recorder_t>())
   , m_liveChainUpdated(new int(0))
   , m_conn(conn)
+  , m_liveRecording(false)
 {
   *m_recorder_t = cmyth_recorder;
 }
@@ -51,22 +54,22 @@ bool MythRecorder::IsNull() const
 void MythRecorder::Lock()
 {
   if (g_bExtraDebug)
-    XBMC->Log(LOG_DEBUG, "Recorder Lock %i", m_recorder_t.get());
+    XBMC->Log(LOG_DEBUG, "Recorder Lock %u", m_recorder_t.get());
   m_recorder_t->Lock();
   if (g_bExtraDebug)
-    XBMC->Log(LOG_DEBUG, "Recorder Lock acquired %i", m_recorder_t.get());
+    XBMC->Log(LOG_DEBUG, "Recorder Lock acquired %u", m_recorder_t.get());
 }
 
 void MythRecorder::Unlock()
 {
   if (g_bExtraDebug)
-    XBMC->Log(LOG_DEBUG, "Recorder Unlock %i", m_recorder_t.get());
+    XBMC->Log(LOG_DEBUG, "Recorder Unlock %u", m_recorder_t.get());
   m_recorder_t->Unlock();
 }
 
-int MythRecorder::ID()
+unsigned int MythRecorder::ID()
 {
-  int retval = 0;
+  unsigned int retval = 0;
   Lock();
   retval = cmyth_recorder_get_recorder_id(*m_recorder_t);
   Unlock();
@@ -91,11 +94,20 @@ bool MythRecorder::IsRecording()
   return retval == 1;
 }
 
+bool MythRecorder::CancelNextRecording(bool cancel)
+{
+  int retval = 0;
+  Lock();
+  retval = cmyth_recorder_cancel_next_recording(*m_recorder_t, cancel ? 1 : 0);
+  Unlock();
+  return retval == 1;
+}
+
 bool MythRecorder::IsTunable(MythChannel &channel)
 {
   Lock();
 
-  XBMC->Log(LOG_DEBUG, "%s: called for recorder %i, channel %i", __FUNCTION__, ID(), channel.ID());
+  XBMC->Log(LOG_DEBUG, "%s: called for recorder %u, channel %u", __FUNCTION__, ID(), channel.ID());
 
   cmyth_inputlist_t inputlist = cmyth_get_free_inputlist(*m_recorder_t);
 
@@ -103,19 +115,19 @@ bool MythRecorder::IsTunable(MythChannel &channel)
   for (int i = 0; i < inputlist->input_count; ++i)
   {
     cmyth_input_t input = inputlist->input_list[i];
-    if ((int)input->sourceid != channel.SourceID())
+    if (input->sourceid != channel.SourceID())
     {
-      XBMC->Log(LOG_DEBUG, "%s: skip input, source id differs (channel: %i, input: %i)", __FUNCTION__, channel.SourceID(), input->sourceid);
+      XBMC->Log(LOG_DEBUG, "%s: skip input, source id differs (channel: %u, input: %u)", __FUNCTION__, channel.SourceID(), input->sourceid);
       continue;
     }
 
-    if (input->multiplexid && (int)input->multiplexid != channel.MultiplexID())
+    if (input->multiplexid && input->multiplexid != channel.MultiplexID())
     {
-      XBMC->Log(LOG_DEBUG, "%s: skip input, multiplex id id differs (channel: %i, input: %i)", __FUNCTION__, channel.MultiplexID(), input->multiplexid);
+      XBMC->Log(LOG_DEBUG, "%s: skip input, multiplex id id differs (channel: %u, input: %u)", __FUNCTION__, channel.MultiplexID(), input->multiplexid);
       continue;
     }
 
-    XBMC->Log(LOG_DEBUG,"%s: using recorder, input is tunable: source id: %i, multiplex id: channel: %i, input: %i)", __FUNCTION__, channel.SourceID(), channel.MultiplexID(), input->multiplexid);
+    XBMC->Log(LOG_DEBUG,"%s: using recorder, input is tunable: source id: %u, multiplex id: channel: %u, input: %u)", __FUNCTION__, channel.SourceID(), channel.MultiplexID(), input->multiplexid);
 
     ret = true;
     break;
@@ -142,6 +154,7 @@ bool MythRecorder::CheckChannel(MythChannel &channel)
 
 bool MythRecorder::SpawnLiveTV(MythChannel &channel)
 {
+  bool ret = false;
   char* pErr = NULL;
 
   Lock();
@@ -149,97 +162,86 @@ bool MythRecorder::SpawnLiveTV(MythChannel &channel)
   // Check channel
   *m_liveChainUpdated = 0;
   cmyth_recorder_t recorder = NULL;
-  recorder = cmyth_spawn_live_tv(*m_recorder_t, 64*1024, 64*1024, MythRecorder::prog_update_callback, &pErr, const_cast<char*>(channel.Number().c_str()));
-  *m_recorder_t = recorder;
+  recorder = cmyth_spawn_live_tv(*m_recorder_t, RCV_BUF_DATA_SIZE, TCP_RCV_BUF_DATA_SIZE, MythRecorder::prog_update_callback, &pErr, const_cast<char*>(channel.Number().c_str()));
 
-  if (pErr == NULL) {
-    /* Wait for chain update for 30s before break */
+  if (recorder && pErr == NULL) {
+    *m_recorder_t = recorder;
+    // Wait for chain update for 30s before break
     int i = 0;
     while (*m_liveChainUpdated == 0 && i < 30000) {
-      /* Release the latch to allow chain update */
+      // Release the latch to allow chain update
       Unlock();
       usleep(100000);
-      /* Gets the latch before read chain status */
+      // Gets the latch before read chain status
       Lock();
       i += 100;
       XBMC->Log(LOG_DEBUG, "%s: Delay channel switch: %d", __FUNCTION__, i);
     }
     if (*m_liveChainUpdated == 0)
-      pErr = const_cast<char*>("Chain update failed.");
+    {
+      XBMC->Log(LOG_ERROR,"%s - Chain update failed", __FUNCTION__);
+      XBMC->QueueNotification(QUEUE_ERROR, XBMC->GetLocalizedString(30304)); // No response from MythTV backend
+    }
+    else
+      ret = true;
+  }
+  else
+  {
+    // Dereference recorder to cancel callback
+    *m_recorder_t = NULL;
+    // Chain setup fails. Stop existing recorder
+    ref_release(recorder);
+    if (pErr)
+      XBMC->Log(LOG_ERROR,"%s - %s", __FUNCTION__, pErr);
+    XBMC->QueueNotification(QUEUE_ERROR, XBMC->GetLocalizedString(30306)); // Recorder unavailable
   }
 
   Unlock();
-  ASSERT(*m_recorder_t);
 
-  if (pErr)
-    XBMC->Log(LOG_ERROR,"%s - %s", __FUNCTION__, pErr);
-  return pErr == NULL;
+  return ret;
 }
 
 bool MythRecorder::SetChannel(MythChannel &channel)
 {
   Lock();
 
-  if (!IsRecording())
-  {
-    XBMC->Log(LOG_ERROR, "%s: Recorder %i is not recording", __FUNCTION__, ID(), const_cast<char*>(channel.Name().c_str()));
-    // m_recorder_t->Unlock();
-    Unlock();
-    return false;
-  }
-
   CStdString channelNum = channel.Number();
 
   if (cmyth_recorder_pause(*m_recorder_t) != 0)
   {
-    XBMC->Log(LOG_ERROR, "%s: Failed to pause recorder %i", __FUNCTION__, ID());
-    // m_recorder_t->Unlock();
-    Unlock();
-    return false;
-  }
-
-  if (!CheckChannel(channel))
-  {
-    XBMC->Log(LOG_ERROR, "%s: Recorder %i doesn't provide channel %s", __FUNCTION__, ID(), channel.Name().c_str());
-    // m_recorder_t->Unlock();
-    Unlock();
-    return false;
-  }
-
-  if (cmyth_recorder_set_channel(*m_recorder_t,channelNum.GetBuffer())!=0)
-  {
-    XBMC->Log(LOG_ERROR, "%s: Failed to change recorder %i to channel %s", __FUNCTION__, ID(), channel.Name().c_str());
-    // m_recorder_t->Unlock();
-    Unlock();
-    return false;
-  }
-
-  if (cmyth_livetv_chain_switch_last(*m_recorder_t) != 1)
-  {
-    XBMC->Log(LOG_ERROR,"%s: Failed to switch chain for recorder %i", __FUNCTION__, ID(), channel.Name().c_str());
-    // m_recorder_t->Unlock();
+    XBMC->Log(LOG_ERROR, "%s: Failed to pause recorder %u", __FUNCTION__, ID());
     Unlock();
     return false;
   }
 
   *m_liveChainUpdated = 0;
-  int i = 20;
-  while (*m_liveChainUpdated == 0 && i-- != 0)
+
+  if (cmyth_recorder_set_channel(*m_recorder_t,channelNum.GetBuffer()) != 0)
   {
+    XBMC->Log(LOG_ERROR, "%s: Failed to change recorder %u to channel %s", __FUNCTION__, ID(), channel.Name().c_str());
+    Unlock();
+    return false;
+  }
+
+  // Wait for chain update for 30s before break
+  int i = 0;
+  while (*m_liveChainUpdated == 0 && i < 30000) {
+    // Release the latch to allow chain update
     Unlock();
     usleep(100000);
+    // Get the latch before reading chain status
     Lock();
+    i += 100;
+    XBMC->Log(LOG_DEBUG, "%s: Delay channel switch: %d", __FUNCTION__, i);
+  }
+  if (*m_liveChainUpdated == 0)
+  {
+    XBMC->Log(LOG_ERROR,"%s - Chain update failed", __FUNCTION__);
+    Unlock();
+    return false;
   }
 
   Unlock();
-
-  for (int i = 0; i < 20; i++)
-  {
-    if (!IsRecording())
-      usleep(1000);
-    else
-      break;
-  }
 
   return true;
 }
@@ -256,7 +258,7 @@ bool MythRecorder::LiveTVWatch(const CStdString &msg)
   Unlock();
   if (retval != 0)
     XBMC->Log(LOG_ERROR, "LiveTVWatch failed: %s", msg.c_str());
-  return retval == 0;
+  return retval >= 0;
 }
 
 /* JLB
@@ -267,11 +269,14 @@ bool MythRecorder::LiveTVDoneRecording(const CStdString &msg)
 {
   int retval = 0;
   Lock();
+  // Recording is now completed and recorder doesn't keep anymore. Track it.
+  m_liveRecording = false;
+  // Return feedback to check the chain
   retval = cmyth_livetv_done_recording(*m_recorder_t, const_cast<char*>(msg.c_str()));
   Unlock();
   if (retval != 0)
     XBMC->Log(LOG_ERROR, "LiveTVDoneRecording failed: %s", msg.c_str());
-  return retval == 0;
+  return retval >= 0;
 }
 
 bool MythRecorder::LiveTVChainUpdate(const CStdString &chainid)
@@ -286,10 +291,10 @@ bool MythRecorder::LiveTVChainUpdate(const CStdString &chainid)
     XBMC->Log(LOG_ERROR,"LiveTVChainUpdate failed on chainID: %s", chainid.c_str());
   else
     *m_liveChainUpdated = 1;
-  return retval == 0;
+  return retval >= 0;
 }
 
-int MythRecorder::ReadLiveTV(void *buffer, unsigned long length)
+int MythRecorder::ReadLiveTV(void *buffer, unsigned int length)
 {
   /* Unlocked: LiveTV stream has its own control connection */
   int bytesRead = 0;
@@ -308,10 +313,23 @@ long long MythRecorder::LiveTVSeek(long long offset, int whence)
 long long MythRecorder::LiveTVDuration()
 {
   long long retval = 0;
-  Lock();
   retval = cmyth_livetv_chain_duration(*m_recorder_t);
-  Unlock();
   return retval;
+}
+
+int MythRecorder::GetLiveTVChainLast()
+{
+  return cmyth_livetv_chain_last(*m_recorder_t);
+}
+
+MythProgramInfo MythRecorder::GetLiveTVChainProgram(int index)
+{
+  return MythProgramInfo(cmyth_livetv_chain_prog(*m_recorder_t, index));
+}
+
+MythFile MythRecorder::GetLiveTVChainFile(int index)
+{
+  return MythFile(cmyth_livetv_chain_file(*m_recorder_t, index));
 }
 
 bool MythRecorder::Stop()
@@ -320,7 +338,30 @@ bool MythRecorder::Stop()
   Lock();
   retval = cmyth_recorder_stop_livetv(*m_recorder_t);
   Unlock();
-  return retval == 0;
+  return retval >= 0;
+}
+
+bool MythRecorder::IsLiveRecording()
+{
+  bool retval;
+  Lock();
+  retval = m_liveRecording;
+  Unlock();
+  return retval;
+}
+
+bool MythRecorder::SetLiveRecording(bool recording)
+{
+  int retval = 0;
+  Lock();
+  retval = cmyth_recorder_set_live_recording(*m_recorder_t, (recording ? 1 : 0));
+  // Check feedback (Response == Request ?) then track it
+  if (recording && retval == 1)
+    m_liveRecording = true;
+  else if (!recording && retval == 0)
+    m_liveRecording = false;
+  Unlock();
+  return retval >= 0;
 }
 
 void MythRecorder::prog_update_callback(cmyth_proginfo_t prog)

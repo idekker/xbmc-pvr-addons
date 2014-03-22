@@ -24,6 +24,8 @@
 #include "client.h"
 #include "HTSPConnection.h"
 #include "platform/util/buffer.h"
+#include "platform/threads/mutex.h"
+#include "xbmc_stream_utils.hpp"
 
 class CHTSPDemux : public CHTSPConnectionCallback
 {
@@ -49,6 +51,8 @@ private:
   void ParseSubscriptionStart (htsmsg_t *m);
   void ParseSubscriptionStop  (htsmsg_t *m);
   void ParseSubscriptionStatus(htsmsg_t *m);
+  void ParseSubscriptionSkip  (htsmsg_t *m);
+  void ParseSubscriptionSpeed (htsmsg_t *m);
   bool SendSubscribe  (int subscription, int channel);
   bool SendUnsubscribe(int subscription);
   bool SendSpeed      (int subscription, int speed);
@@ -56,6 +60,7 @@ private:
   void ParseMuxPacket(htsmsg_t *m);
   bool ParseQueueStatus(htsmsg_t* msg);
   bool ParseSignalStatus(htsmsg_t* msg);
+  bool ParseTimeshiftStatus(htsmsg_t* msg);
   bool ParseSourceInfo(htsmsg_t* msg);
 
   CHTSPConnection*                     m_session;
@@ -64,12 +69,15 @@ private:
   int                                  m_channel;
   int                                  m_tag;
   std::string                          m_Status;
-  PVR_STREAM_PROPERTIES                m_Streams;
+  ADDON::XbmcStreamProperties          m_streams;
   SChannels                            m_channels;
   SQueueStatus                         m_QueueStatus;
   SQuality                             m_Quality;
   SSourceInfo                          m_SourceInfo;
-  std::map<int, unsigned int>          m_StreamIndex;
   PLATFORM::SyncedBuffer<DemuxPacket*> m_demuxPacketBuffer;
   bool                                 m_bIsOpen;
+  PLATFORM::CEvent*                    m_seekEvent;
+  double                               m_seekTime;
+  PLATFORM::CMutex                     m_mutex;
+  PLATFORM::CCondition<bool>           m_startedCondition;
 };

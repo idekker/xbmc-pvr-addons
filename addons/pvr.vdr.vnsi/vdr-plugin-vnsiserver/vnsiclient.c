@@ -25,6 +25,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <map>
 
 #include <vdr/recording.h>
 #include <vdr/channels.h>
@@ -34,33 +35,22 @@
 #include <vdr/menu.h>
 #include <vdr/device.h>
 
+#include "vnsi.h"
 #include "config.h"
 #include "vnsicommand.h"
 #include "recordingscache.h"
 #include "vnsiclient.h"
-#include "receiver.h"
+#include "streamer.h"
 #include "vnsiserver.h"
 #include "recplayer.h"
+#include "vnsiosd.h"
 #include "requestpacket.h"
 #include "responsepacket.h"
 #include "hash.h"
+#include "channelfilter.h"
 #include "wirbelscanservice.h" /// copied from modified wirbelscan plugin
                                /// must be hold up to date with wirbelscan
 
-
-static bool IsRadio(const cChannel* channel)
-{
-  bool isRadio = false;
-
-  // assume channels without VPID & APID are video channels
-  if (channel->Vpid() == 0 && channel->Apid(0) == 0)
-    isRadio = false;
-  // channels without VPID are radio channels (channels with VPID 1 are encrypted radio channels)
-  else if (channel->Vpid() == 0 || channel->Vpid() == 1)
-    isRadio = true;
-
-  return isRadio;
-}
 
 cMutex cVNSIClient::m_timerLock;
 
@@ -76,9 +66,9 @@ cVNSIClient::cVNSIClient(int fd, unsigned int id, const char *ClientAdr)
   m_resp                    = NULL;
   m_processSCAN_Response    = NULL;
   m_processSCAN_Socket      = NULL;
+  m_Osd                     = NULL;
 
-
-  m_socket.set_handle(fd);
+  m_socket.SetHandle(fd);
 
   Start();
 }
@@ -94,7 +84,6 @@ cVNSIClient::~cVNSIClient()
 
 void cVNSIClient::Action(void)
 {
-  uint32_t kaTimeStamp;
   uint32_t channelID;
   uint32_t requestID;
   uint32_t opcode;
@@ -156,23 +145,6 @@ void cVNSIClient::Action(void)
 
       processRequest(req);
     }
-    else if (channelID == 3)
-    {
-      if (!m_socket.read((uint8_t*)&kaTimeStamp, sizeof(uint32_t), 1000)) break;
-      kaTimeStamp = ntohl(kaTimeStamp);
-
-      uint8_t buffer[8];
-      uint32_t ul;
-      ul = htonl(3); // KA CHANNEL
-      memcpy(&buffer[0], &ul, sizeof(uint32_t));
-      ul = htonl(kaTimeStamp);
-      memcpy(&buffer[4], &ul, sizeof(uint32_t));
-      if (!m_socket.write(buffer, 8))
-      {
-        ERRORLOG("Could not send back KA reply");
-        break;
-      }
-    }
     else
     {
       ERRORLOG("Incoming channel number unknown");
@@ -183,12 +155,19 @@ void cVNSIClient::Action(void)
   /* If thread is ended due to closed connection delete a
      possible running stream here */
   StopChannelStreaming();
+
+  // Shutdown OSD
+  if (m_Osd)
+  {
+    delete m_Osd;
+    m_Osd = NULL;
+  }
 }
 
-bool cVNSIClient::StartChannelStreaming(const cChannel *channel, uint32_t timeout)
+bool cVNSIClient::StartChannelStreaming(const cChannel *channel, int32_t priority, uint8_t timeshift, uint32_t timeout)
 {
-  m_Streamer    = new cLiveStreamer(timeout);
-  m_isStreaming = m_Streamer->StreamChannel(channel, 50, &m_socket, m_resp);
+  m_Streamer    = new cLiveStreamer(m_Id, timeshift, timeout);
+  m_isStreaming = m_Streamer->StreamChannel(channel, priority, &m_socket, m_resp);
   return m_isStreaming;
 }
 
@@ -226,7 +205,7 @@ void cVNSIClient::TimerChange()
   }
 }
 
-void cVNSIClient::ChannelChange()
+void cVNSIClient::ChannelsChange()
 {
   cMutexLock lock(&m_msgLock);
 
@@ -262,6 +241,57 @@ void cVNSIClient::RecordingsChange()
   resp->finalise();
   m_socket.write(resp->getPtr(), resp->getLen());
   delete resp;
+}
+
+void cVNSIClient::EpgChange()
+{
+  cMutexLock lock(&m_msgLock);
+
+  if (!m_StatusInterfaceEnabled)
+    return;
+
+  cSchedulesLock MutexLock;
+  const cSchedules *schedules = cSchedules::Schedules(MutexLock);
+  if (!schedules)
+    return;
+
+  std::map<int, time_t>::iterator it;
+  for (const cSchedule *schedule = schedules->First(); schedule; schedule = schedules->Next(schedule))
+  {
+    cEvent *lastEvent =  schedule->Events()->Last();
+    if (!lastEvent)
+      continue;
+
+    Channels.Lock(false);
+    const cChannel *channel = Channels.GetByChannelID(schedule->ChannelID());
+    Channels.Unlock();
+
+    if (!channel)
+      continue;
+
+    if (!VNSIChannelFilter.PassFilter(*channel))
+      continue;
+
+    uint32_t channelId = CreateStringHash(schedule->ChannelID().ToString());
+    it = m_epgUpdate.find(channelId);
+    if (it != m_epgUpdate.end() && it->second >= lastEvent->StartTime())
+    {
+      continue;
+    }
+
+    INFOLOG("Trigger EPG update for channel %s, id: %d", channel->Name(), channelId);
+
+    cResponsePacket *resp = new cResponsePacket();
+    if (!resp->initStatus(VNSI_STATUS_EPGCHANGE))
+    {
+      delete resp;
+      return;
+    }
+    resp->add_U32(channelId);
+    resp->finalise();
+    m_socket.write(resp->getPtr(), resp->getLen());
+    delete resp;
+  }
 }
 
 void cVNSIClient::Recording(const cDevice *Device, const char *Name, const char *FileName, bool On)
@@ -338,6 +368,15 @@ void cVNSIClient::OsdStatusMessage(const char *Message)
   }
 }
 
+void cVNSIClient::ChannelChange(const cChannel *Channel)
+{
+  cMutexLock lock(&m_msgLock);
+  if (m_isStreaming && m_Streamer)
+  {
+    m_Streamer->RetuneChannel(Channel);
+  }
+}
+
 bool cVNSIClient::processRequest(cRequestPacket* req)
 {
   cMutexLock lock(&m_msgLock);
@@ -374,6 +413,13 @@ bool cVNSIClient::processRequest(cRequestPacket* req)
       result = process_Ping();
       break;
 
+    case VNSI_GETSETUP:
+      result = process_GetSetup();
+      break;
+
+    case VNSI_STORESETUP:
+      result = process_StoreSetup();
+      break;
 
     /** OPCODE 20 - 39: VNSI network functions for live streaming */
     case VNSI_CHANNELSTREAM_OPEN:
@@ -384,6 +430,9 @@ bool cVNSIClient::processRequest(cRequestPacket* req)
       result = processChannelStream_Close();
       break;
 
+    case VNSI_CHANNELSTREAM_SEEK:
+      result = processChannelStream_Seek();
+      break;
 
     /** OPCODE 40 - 59: VNSI network functions for recording streaming */
     case VNSI_RECSTREAM_OPEN:
@@ -410,6 +459,10 @@ bool cVNSIClient::processRequest(cRequestPacket* req)
       result = processRecStream_GetIFrame();
       break;
 
+    case VNSI_RECSTREAM_GETLENGTH:
+      result = processRecStream_GetLength();
+      break;
+
 
     /** OPCODE 60 - 79: VNSI network functions for channel access */
     case VNSI_CHANNELS_GETCOUNT:
@@ -430,6 +483,26 @@ bool cVNSIClient::processRequest(cRequestPacket* req)
 
     case VNSI_CHANNELGROUP_MEMBERS:
       result = processCHANNELS_GetGroupMembers();
+      break;
+
+    case VNSI_CHANNELS_GETCAIDS:
+      result = processCHANNELS_GetCaids();
+      break;
+
+    case VNSI_CHANNELS_GETWHITELIST:
+      result = processCHANNELS_GetWhitelist();
+      break;
+
+    case VNSI_CHANNELS_GETBLACKLIST:
+      result = processCHANNELS_GetBlacklist();
+      break;
+
+    case VNSI_CHANNELS_SETWHITELIST:
+      result = processCHANNELS_SetWhitelist();
+      break;
+
+    case VNSI_CHANNELS_SETBLACKLIST:
+      result = processCHANNELS_SetBlacklist();
       break;
 
     /** OPCODE 80 - 99: VNSI network functions for timer access */
@@ -479,6 +552,9 @@ bool cVNSIClient::processRequest(cRequestPacket* req)
       result = processRECORDINGS_Delete();
       break;
 
+    case VNSI_RECORDINGS_GETEDL:
+      result = processRECORDINGS_GetEdl();
+      break;
 
     /** OPCODE 120 - 139: VNSI network functions for epg access and manipulating */
     case VNSI_EPG_GETFORCHANNEL:
@@ -505,6 +581,19 @@ bool cVNSIClient::processRequest(cRequestPacket* req)
 
     case VNSI_SCAN_STOP:
       result = processSCAN_Stop();
+      break;
+
+    /** OPCODE 160 - 179: VNSI network functions for OSD */
+    case VNSI_OSD_CONNECT:
+      result = processOSD_Connect();
+      break;
+
+    case VNSI_OSD_DISCONNECT:
+      result = processOSD_Disconnect();
+      break;
+
+    case VNSI_OSD_HITKEY:
+      result = processOSD_Hitkey();
       break;
   }
 
@@ -572,6 +661,7 @@ bool cVNSIClient::process_EnableStatusInterface()
   bool enabled = m_req->extract_U8();
 
   SetStatusInterface(enabled);
+  SetPriority(1);
 
   m_resp->add_U32(VNSI_RET_OK);
   m_resp->finalise();
@@ -587,12 +677,61 @@ bool cVNSIClient::process_Ping() /* OPCODE 7 */
   return true;
 }
 
+bool cVNSIClient::process_GetSetup() /* OPCODE 8 */
+{
+  char* name = m_req->extract_String();
+  if (!strcasecmp(name, CONFNAME_PMTTIMEOUT))
+    m_resp->add_U32(PmtTimeout);
+  else if (!strcasecmp(name, CONFNAME_TIMESHIFT))
+    m_resp->add_U32(TimeshiftMode);
+  else if (!strcasecmp(name, CONFNAME_TIMESHIFTBUFFERSIZE))
+    m_resp->add_U32(TimeshiftBufferSize);
+  else if (!strcasecmp(name, CONFNAME_TIMESHIFTBUFFERFILESIZE))
+    m_resp->add_U32(TimeshiftBufferFileSize);
+
+  m_resp->finalise();
+  m_socket.write(m_resp->getPtr(), m_resp->getLen());
+  return true;
+}
+
+bool cVNSIClient::process_StoreSetup() /* OPCODE 9 */
+{
+  char* name = m_req->extract_String();
+
+  if (!strcasecmp(name, CONFNAME_PMTTIMEOUT))
+  {
+    int value = m_req->extract_U32();
+    cPluginVNSIServer::StoreSetup(CONFNAME_PMTTIMEOUT, value);
+  }
+  else if (!strcasecmp(name, CONFNAME_TIMESHIFT))
+  {
+    int value = m_req->extract_U32();
+    cPluginVNSIServer::StoreSetup(CONFNAME_TIMESHIFT, value);
+  }
+  else if (!strcasecmp(name, CONFNAME_TIMESHIFTBUFFERSIZE))
+  {
+    int value = m_req->extract_U32();
+    cPluginVNSIServer::StoreSetup(CONFNAME_TIMESHIFTBUFFERSIZE, value);
+  }
+  else if (!strcasecmp(name, CONFNAME_TIMESHIFTBUFFERFILESIZE))
+  {
+    int value = m_req->extract_U32();
+    cPluginVNSIServer::StoreSetup(CONFNAME_TIMESHIFTBUFFERFILESIZE, value);
+  }
+
+  m_resp->add_U32(VNSI_RET_OK);
+  m_resp->finalise();
+  m_socket.write(m_resp->getPtr(), m_resp->getLen());
+  return true;
+}
 
 /** OPCODE 20 - 39: VNSI network functions for live streaming */
 
 bool cVNSIClient::processChannelStream_Open() /* OPCODE 20 */
 {
   uint32_t uid = m_req->extract_U32();
+  int32_t priority = m_req->extract_S32();
+  uint8_t timeshift = m_req->extract_U8();
   uint32_t timeout = m_req->extract_U32();
 
   if(timeout == 0)
@@ -618,7 +757,7 @@ bool cVNSIClient::processChannelStream_Open() /* OPCODE 20 */
   }
   else
   {
-    if (StartChannelStreaming(channel, timeout))
+    if (StartChannelStreaming(channel, priority, timeshift, timeout))
     {
       INFOLOG("Started streaming of channel %s (timeout %i seconds)", channel->Name(), timeout);
       // return here without sending the response
@@ -644,6 +783,25 @@ bool cVNSIClient::processChannelStream_Close() /* OPCODE 21 */
   return true;
 }
 
+bool cVNSIClient::processChannelStream_Seek() /* OPCODE 22 */
+{
+  uint32_t serial = 0;
+  if (m_isStreaming && m_Streamer)
+  {
+    int64_t time = m_req->extract_S64();
+    if (m_Streamer->SeekTime(time, serial))
+      m_resp->add_U32(VNSI_RET_OK);
+    else
+      m_resp->add_U32(VNSI_RET_ERROR);
+  }
+  else
+    m_resp->add_U32(VNSI_RET_ERROR);
+
+  m_resp->add_U32(serial);
+  m_resp->finalise();
+  m_socket.write(m_resp->getPtr(), m_resp->getLen());
+  return true;
+}
 
 /** OPCODE 40 - 59: VNSI network functions for recording streaming */
 
@@ -790,6 +948,23 @@ bool cVNSIClient::processRecStream_GetIFrame() /* OPCODE 45 */
   return true;
 }
 
+bool cVNSIClient::processRecStream_GetLength() /* OPCODE 46 */
+{
+  uint64_t length = 0;
+
+  if (m_RecPlayer)
+  {
+    m_RecPlayer->reScan();
+    length = m_RecPlayer->getLengthBytes();
+  }
+
+  m_resp->add_U64(length);
+
+  m_resp->finalise();
+  m_socket.write(m_resp->getPtr(), m_resp->getLen());
+
+  return true;
+}
 
 /** OPCODE 60 - 79: VNSI network functions for channel access */
 
@@ -808,31 +983,42 @@ bool cVNSIClient::processCHANNELS_ChannelsCount() /* OPCODE 61 */
 
 bool cVNSIClient::processCHANNELS_GetChannels() /* OPCODE 63 */
 {
-  if (m_req->getDataLength() != 4) return false;
+  if (m_req->getDataLength() != 5) return false;
 
   bool radio = m_req->extract_U32();
+  bool filter = m_req->extract_U8();
 
   Channels.Lock(false);
 
+  cString caids;
+  int caid;
+  int caid_idx;
   for (cChannel *channel = Channels.First(); channel; channel = Channels.Next(channel))
   {
-    if (radio != IsRadio(channel))
+    if (radio != cVNSIChannelFilter::IsRadio(channel))
       continue;
 
     // skip invalid channels
     if (channel->Sid() == 0)
       continue;
 
+    // check filter
+    if (filter && !VNSIChannelFilter.PassFilter(*channel))
+      continue;
+
     m_resp->add_U32(channel->Number());
     m_resp->add_String(m_toUTF8.Convert(channel->Name()));
+    m_resp->add_String(m_toUTF8.Convert(channel->Provider()));
     m_resp->add_U32(CreateChannelUID(channel));
-    m_resp->add_U32(0); // groupindex unused
-    m_resp->add_U32(channel->Ca());
-#if APIVERSNUM >= 10701
-    m_resp->add_U32(channel->Vtype());
-#else
-    m_resp->add_U32(2);
-#endif
+    m_resp->add_U32(channel->Ca(0));
+    caid_idx = 0;
+    caids = "caids:";
+    while((caid = channel->Ca(caid_idx)) != 0)
+    {
+      caids = cString::sprintf("%s%d;", (const char*)caids, caid);
+      caid_idx++;
+    }
+    m_resp->add_String((const char*)caids);
   }
 
   Channels.Unlock();
@@ -895,6 +1081,7 @@ bool cVNSIClient::processCHANNELS_GetGroupMembers()
 {
   char* groupname = m_req->extract_String();
   uint32_t radio = m_req->extract_U8();
+  bool filter = m_req->extract_U8();
   int index = 0;
 
   // unknown group
@@ -928,7 +1115,11 @@ bool cVNSIClient::processCHANNELS_GetGroupMembers()
     if(name.empty())
       continue;
 
-    if(IsRadio(channel) != radio)
+    if(cVNSIChannelFilter::IsRadio(channel) != radio)
+      continue;
+
+    // check filter
+    if (filter && !VNSIChannelFilter.PassFilter(*channel))
       continue;
 
     if(name == groupname)
@@ -946,13 +1137,142 @@ bool cVNSIClient::processCHANNELS_GetGroupMembers()
   return true;
 }
 
+bool cVNSIClient::processCHANNELS_GetCaids()
+{
+  uint32_t uid = m_req->extract_U32();
+
+  Channels.Lock(false);
+  const cChannel *channel = NULL;
+  channel = FindChannelByUID(uid);
+  Channels.Unlock();
+
+  if (channel != NULL)
+  {
+    int caid;
+    int idx = 0;
+    while((caid = channel->Ca(idx)) != 0)
+    {
+      m_resp->add_U32(caid);
+      idx++;
+    }
+  }
+
+  m_resp->finalise();
+  m_socket.write(m_resp->getPtr(), m_resp->getLen());
+
+  return true;
+}
+
+bool cVNSIClient::processCHANNELS_GetWhitelist()
+{
+  bool radio = m_req->extract_U8();
+  std::vector<cVNSIProvider> *providers;
+
+  if(radio)
+    providers = &VNSIChannelFilter.m_providersRadio;
+  else
+    providers = &VNSIChannelFilter.m_providersVideo;
+
+  VNSIChannelFilter.m_Mutex.Lock();
+  for(unsigned int i=0; i<providers->size(); i++)
+  {
+    m_resp->add_String((*providers)[i].m_name.c_str());
+    m_resp->add_U32((*providers)[i].m_caid);
+  }
+  VNSIChannelFilter.m_Mutex.Unlock();
+
+  m_resp->finalise();
+  m_socket.write(m_resp->getPtr(), m_resp->getLen());
+  return true;
+}
+
+bool cVNSIClient::processCHANNELS_GetBlacklist()
+{
+  bool radio = m_req->extract_U8();
+  std::vector<int> *channels;
+
+  if(radio)
+    channels = &VNSIChannelFilter.m_channelsRadio;
+  else
+    channels = &VNSIChannelFilter.m_channelsVideo;
+
+  VNSIChannelFilter.m_Mutex.Lock();
+  for(unsigned int i=0; i<channels->size(); i++)
+  {
+    m_resp->add_U32((*channels)[i]);
+  }
+  VNSIChannelFilter.m_Mutex.Unlock();
+
+  m_resp->finalise();
+  m_socket.write(m_resp->getPtr(), m_resp->getLen());
+  return true;
+}
+
+bool cVNSIClient::processCHANNELS_SetWhitelist()
+{
+  bool radio = m_req->extract_U8();
+  cVNSIProvider provider;
+  std::vector<cVNSIProvider> *providers;
+
+  if(radio)
+    providers = &VNSIChannelFilter.m_providersRadio;
+  else
+    providers = &VNSIChannelFilter.m_providersVideo;
+
+  VNSIChannelFilter.m_Mutex.Lock();
+  providers->clear();
+
+  while(!m_req->end())
+  {
+    char *str = m_req->extract_String();
+    provider.m_name = str;
+    provider.m_caid = m_req->extract_U32();
+    delete [] str;
+    providers->push_back(provider);
+  }
+  VNSIChannelFilter.StoreWhitelist(radio);
+  VNSIChannelFilter.m_Mutex.Unlock();
+
+  m_resp->finalise();
+  m_socket.write(m_resp->getPtr(), m_resp->getLen());
+  return true;
+}
+
+bool cVNSIClient::processCHANNELS_SetBlacklist()
+{
+  bool radio = m_req->extract_U8();
+  cVNSIProvider provider;
+  std::vector<int> *channels;
+
+  if(radio)
+    channels = &VNSIChannelFilter.m_channelsRadio;
+  else
+    channels = &VNSIChannelFilter.m_channelsVideo;
+
+  VNSIChannelFilter.m_Mutex.Lock();
+  channels->clear();
+
+  int id;
+  while(!m_req->end())
+  {
+    id = m_req->extract_U32();
+    channels->push_back(id);
+  }
+  VNSIChannelFilter.StoreBlacklist(radio);
+  VNSIChannelFilter.m_Mutex.Unlock();
+
+  m_resp->finalise();
+  m_socket.write(m_resp->getPtr(), m_resp->getLen());
+  return true;
+}
+
 void cVNSIClient::CreateChannelGroups(bool automatic)
 {
   std::string groupname;
 
   for (cChannel *channel = Channels.First(); channel; channel = Channels.Next(channel))
   {
-    bool isRadio = IsRadio(channel);
+    bool isRadio = cVNSIChannelFilter::IsRadio(channel);
 
     if(automatic && !channel->GroupSep())
       groupname = channel->Provider();
@@ -1274,7 +1594,11 @@ bool cVNSIClient::processTIMER_Update() /* OPCODE 85 */
 bool cVNSIClient::processRECORDINGS_GetDiskSpace() /* OPCODE 100 */
 {
   int FreeMB;
+#if VDRVERSNUM >= 20102
+  int Percent = cVideoDirectory::VideoDiskSpace(&FreeMB);
+#else
   int Percent = VideoDiskSpace(&FreeMB);
+#endif
   int Total   = (FreeMB / (100 - Percent)) * 100;
 
   m_resp->add_U32(Total);
@@ -1299,6 +1623,7 @@ bool cVNSIClient::processRECORDINGS_GetCount() /* OPCODE 101 */
 bool cVNSIClient::processRECORDINGS_GetList() /* OPCODE 102 */
 {
   cMutexLock lock(&m_timerLock);
+  cThreadLock RecordingsLock(&Recordings);
 
   for (cRecording *recording = Recordings.First(); recording; recording = Recordings.Next(recording))
   {
@@ -1427,7 +1752,7 @@ bool cVNSIClient::processRECORDINGS_Rename() /* OPCODE 103 */
 
     // replace spaces in newtitle
     strreplace(newtitle, ' ', '_');
-    char* filename_new = new char[512];
+    char* filename_new = new char[1024];
     strncpy(filename_new, filename_old, 512);
     sep = strrchr(filename_new, '/');
     if(sep != NULL) {
@@ -1497,6 +1822,37 @@ bool cVNSIClient::processRECORDINGS_Delete() /* OPCODE 104 */
   return true;
 }
 
+bool cVNSIClient::processRECORDINGS_GetEdl() /* OPCODE 105 */
+{
+  cString recName;
+  cRecording* recording = NULL;
+
+  uint32_t uid = m_req->extract_U32();
+  recording = cRecordingsCache::GetInstance().Lookup(uid);
+
+  if (recording)
+  {
+    cMarks marks;
+    if(marks.Load(recording->FileName(), recording->FramesPerSecond(), recording->IsPesRecording()))
+    {
+#if VDRVERSNUM >= 10732
+      cMark* mark = NULL;
+      double fps = recording->FramesPerSecond();
+      while((mark = marks.GetNextBegin(mark)) != NULL)
+      {
+        m_resp->add_U64(mark->Position() *1000 / fps);
+        m_resp->add_U64(mark->Position() *1000 / fps);
+        m_resp->add_S32(2);
+      }
+#endif
+    }
+  }
+  m_resp->finalise();
+  m_socket.write(m_resp->getPtr(), m_resp->getLen());
+
+  return true;
+}
+
 
 /** OPCODE 120 - 139: VNSI network functions for epg access and manipulating */
 
@@ -1532,6 +1888,7 @@ bool cVNSIClient::processEPG_GetForChannel() /* OPCODE 120 */
 
   cSchedulesLock MutexLock;
   const cSchedules *Schedules = cSchedules::Schedules(MutexLock);
+  m_epgUpdate[channelUID] = 0;
   if (!Schedules)
   {
     m_resp->add_U32(0);
@@ -1623,6 +1980,11 @@ bool cVNSIClient::processEPG_GetForChannel() /* OPCODE 120 */
   m_resp->finalise();
   m_socket.write(m_resp->getPtr(), m_resp->getLen());
 
+  cEvent *lastEvent =  Schedule->Events()->Last();
+  if (lastEvent)
+  {
+    m_epgUpdate[channelUID] = lastEvent->StartTime();
+  }
   DEBUGLOG("written schedules packet");
 
   return true;
@@ -1880,4 +2242,39 @@ void cVNSIClient::processSCAN_SetStatus(int status)
   resp->finalise();
   m_processSCAN_Socket->write(resp->getPtr(), resp->getLen());
   delete resp;
+}
+
+bool cVNSIClient::processOSD_Connect() /* OPCODE 160 */
+{
+  m_Osd = new cVnsiOsdProvider(&m_socket);
+  int osdWidth, osdHeight;
+  double aspect;
+  cDevice::PrimaryDevice()->GetOsdSize(osdWidth, osdHeight, aspect);
+  m_resp->add_U32(osdWidth);
+  m_resp->add_U32(osdHeight);
+  m_resp->finalise();
+  m_socket.write(m_resp->getPtr(), m_resp->getLen());
+
+  m_Osd = new cVnsiOsdProvider(&m_socket);
+  return true;
+}
+
+bool cVNSIClient::processOSD_Disconnect() /* OPCODE 161 */
+{
+  if (m_Osd)
+  {
+    delete m_Osd;
+    m_Osd = NULL;
+  }
+  return true;
+}
+
+bool cVNSIClient::processOSD_Hitkey() /* OPCODE 162 */
+{
+  if (m_Osd)
+  {
+    unsigned int key = m_req->extract_U32();
+    cVnsiOsdProvider::SendKey(key);
+  }
+  return true;
 }

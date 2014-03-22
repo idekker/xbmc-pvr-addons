@@ -21,6 +21,10 @@
  */
 
 #include <inttypes.h>
+#include "client.h"
 
 uint64_t ntohll(uint64_t a);
 uint64_t htonll(uint64_t a);
+
+#include "libXBMC_codec.h"
+#include "xbmc_codec_descriptor.hpp"

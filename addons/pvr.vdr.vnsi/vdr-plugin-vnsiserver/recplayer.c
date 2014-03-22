@@ -34,11 +34,16 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-cRecPlayer::cRecPlayer(cRecording* rec)
+#ifndef O_NOATIME
+#define O_NOATIME 0
+#endif
+
+cRecPlayer::cRecPlayer(cRecording* rec, bool inProgress)
 {
   m_file          = -1;
   m_fileOpen      = -1;
   m_recordingFilename = strdup(rec->FileName());
+  m_inProgress = inProgress;
 
   // FIXME find out max file path / name lengths
 #if VDRVERSNUM < 10703
@@ -94,6 +99,39 @@ void cRecPlayer::scan()
   INFOLOG("total frames: %u", m_totalFrames);
 }
 
+void cRecPlayer::reScan()
+{
+  struct stat s;
+
+  m_totalLength = 0;
+
+  for(int i = 0; ; i++) // i think we only need one possible loop
+  {
+    fileNameFromIndex(i);
+
+    if(stat(m_fileName, &s) == -1) {
+      break;
+    }
+
+    cSegment* segment;
+    if (m_segments.Size() < i+1)
+    {
+      cSegment* segment = new cSegment();
+      m_segments.Append(segment);
+      segment->start = m_totalLength;
+    }
+    else
+      segment = m_segments[i];
+
+    segment->end = segment->start + s.st_size;
+
+    m_totalLength += s.st_size;
+  }
+
+  m_totalFrames = m_indexFile->Last();
+}
+
+
 cRecPlayer::~cRecPlayer()
 {
   cleanup();
@@ -118,7 +156,7 @@ bool cRecPlayer::openFile(int index)
   fileNameFromIndex(index);
   INFOLOG("openFile called for index %i string:%s", index, m_fileName);
 
-  m_file = open(m_fileName, O_RDONLY | O_NOATIME);
+  m_file = open(m_fileName, O_RDONLY);
   if (m_file == -1)
   {
     INFOLOG("file failed to open");
@@ -155,14 +193,20 @@ uint32_t cRecPlayer::getLengthFrames()
 int cRecPlayer::getBlock(unsigned char* buffer, uint64_t position, int amount)
 {
   // dont let the block be larger than 256 kb
-  if (amount > 256*1024)
-    amount = 256*1024;
+  if (amount > 512*1024)
+    amount = 512*1024;
 
   if ((uint64_t)amount > m_totalLength)
     amount = m_totalLength;
 
   if (position >= m_totalLength)
-    return 0;
+  {
+    reScan();
+    if (position >= m_totalLength)
+    {
+      return 0;
+    }
+  }
 
   if ((position + amount) > m_totalLength)
     amount = m_totalLength - position;
@@ -178,16 +222,19 @@ int cRecPlayer::getBlock(unsigned char* buffer, uint64_t position, int amount)
   }
 
   // segment not found / invalid position
-  if (segmentNumber == -1) return 0;
+  if (segmentNumber == -1)
+    return 0;
 
   // open file (if not already open)
-  if (!openFile(segmentNumber)) return 0;
+  if (!openFile(segmentNumber))
+    return 0;
 
   // work out position in current file
   uint64_t filePosition = position - m_segments[segmentNumber]->start;
 
   // seek to position
-  if(lseek(m_file, filePosition, SEEK_SET) == -1) {
+  if(lseek(m_file, filePosition, SEEK_SET) == -1)
+  {
     ERRORLOG("unable to seek to position: %lu", filePosition);
     return 0;
   }
@@ -195,16 +242,21 @@ int cRecPlayer::getBlock(unsigned char* buffer, uint64_t position, int amount)
   // try to read the block
   int bytes_read = read(m_file, buffer, amount);
 
-  if(bytes_read <= 0) {
+  // we may got stuck at end of segment
+  if ((bytes_read == 0) && (position < m_totalLength))
+    bytes_read += getBlock(buffer, position+1 , amount);
+
+  if(bytes_read <= 0)
+  {
     return 0;
   }
 
-  // Tell linux not to bother keeping the data in the FS cache
-  posix_fadvise(m_file, filePosition, bytes_read, POSIX_FADV_DONTNEED);
-
-  // divide and conquer
-  if(bytes_read < amount) {
-    bytes_read += getBlock(&buffer[bytes_read], position + bytes_read, amount - bytes_read);
+  if (!m_inProgress)
+  {
+#ifndef __FreeBSD__
+    // Tell linux not to bother keeping the data in the FS cache
+    posix_fadvise(m_file, filePosition, bytes_read, POSIX_FADV_DONTNEED);
+#endif
   }
 
   return bytes_read;
@@ -212,7 +264,8 @@ int cRecPlayer::getBlock(unsigned char* buffer, uint64_t position, int amount)
 
 uint64_t cRecPlayer::positionFromFrameNumber(uint32_t frameNumber)
 {
-  if (!m_indexFile) return 0;
+  if (!m_indexFile)
+    return 0;
 #if VDRVERSNUM < 10703
   unsigned char retFileNumber;
   int retFileOffset;

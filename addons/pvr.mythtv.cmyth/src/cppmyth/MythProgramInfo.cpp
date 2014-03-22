@@ -24,13 +24,42 @@
 
 MythProgramInfo::MythProgramInfo()
   : m_proginfo_t()
+  , m_UID()
+  , m_frameRate(-1)
+  , m_coverart("")
+  , m_fanart("")
 {
 }
 
 MythProgramInfo::MythProgramInfo(cmyth_proginfo_t cmyth_proginfo)
   : m_proginfo_t(new MythPointer<cmyth_proginfo_t>())
+  , m_UID()
+  , m_frameRate(-1)
+  , m_coverart("")
+  , m_fanart("")
 {
   *m_proginfo_t = cmyth_proginfo;
+  // Make Unique Identifier
+  if (cmyth_proginfo)
+  {
+    MythTimestamp ts = MythTimestamp(cmyth_proginfo_rec_start(cmyth_proginfo));
+    m_UID = MakeUID(ChannelID(), ts);
+  }
+}
+
+CStdString MythProgramInfo::MakeUID(unsigned int chanid, MythTimestamp &ts)
+{
+  char buf[50] = "";
+  CStdString timestr;
+  if (!ts.IsUTC())
+  {
+    MythTimestamp utc = ts.ToUTC();
+    timestr = utc.String();
+  }
+  else
+    timestr = ts.String();
+  sprintf(buf, "%u %s", chanid, timestr.c_str());
+  return CStdString(buf);
 }
 
 bool MythProgramInfo::IsNull() const
@@ -40,24 +69,21 @@ bool MythProgramInfo::IsNull() const
   return *m_proginfo_t == NULL;
 }
 
-CStdString MythProgramInfo::StrUID()
+bool MythProgramInfo::operator ==(MythProgramInfo &other)
 {
-  // Creates unique IDs from ChannelID, RecordID and StartTime like "100_200_2011-12-10T12:00:00"
-  char buf[40] = "";
-  sprintf(buf, "%d_%ld_", ChannelID(), RecordID());
-  time_t starttime = RecordingStartTime();
-  strftime(buf + strlen(buf), 20, "%Y-%m-%dT%H:%M:%S", localtime(&starttime));
-  return CStdString(buf);
+  if (!this->IsNull() && !other.IsNull() && this->UID() == other.UID())
+    return true;
+  return false;
 }
 
-long long MythProgramInfo::UID()
+bool MythProgramInfo::operator !=(MythProgramInfo &other)
 {
-  long long retval = RecordingStartTime();
-  retval <<= 32;
-  retval += ChannelID();
-  if (retval > 0)
-    retval = -retval;
-  return retval;
+  return !(*this == other);
+}
+
+CStdString MythProgramInfo::UID() const
+{
+  return m_UID;
 }
 
 CStdString MythProgramInfo::ProgramID()
@@ -68,18 +94,11 @@ CStdString MythProgramInfo::ProgramID()
   return retval;
 }
 
-CStdString MythProgramInfo::Title(bool subtitleEncoded)
+CStdString MythProgramInfo::Title()
 {
   char* title = cmyth_proginfo_title(*m_proginfo_t);
   CStdString retval(title);
   ref_release(title);
-
-  if (subtitleEncoded)
-  {
-    CStdString subtitle = Subtitle();
-    if (!subtitle.empty())
-      retval.Format("%s - %s", retval, subtitle);
-  }
   return retval;
 }
 
@@ -91,7 +110,7 @@ CStdString MythProgramInfo::Subtitle()
   return retval;
 }
 
-CStdString MythProgramInfo::Path()
+CStdString MythProgramInfo::BaseName()
 {
   char* path = cmyth_proginfo_pathname(*m_proginfo_t);
   CStdString retval(path);
@@ -149,7 +168,33 @@ bool MythProgramInfo::IsDeletePending()
   return (recording_flags & 0x00000080) != 0; // FL_DELETEPENDING
 }
 
-int MythProgramInfo::ChannelID()
+bool MythProgramInfo::HasBookmark()
+{
+  unsigned long recording_flags = cmyth_proginfo_flags(*m_proginfo_t);
+  return (recording_flags & 0x00000010) != 0; // FL_BOOKMARK
+}
+
+bool MythProgramInfo::IsVisible()
+{
+  // Filter out recording of special storage group Deleted
+  // Filter out recording with duration less than 5 seconds
+  // When  deleting a recording, it might not be deleted immediately but marked as 'pending delete'.
+  // Depending on the protocol version the recording is moved to the group Deleted or
+  // the 'delete pending' flag is set
+  if (Duration() < 5 || RecordingGroup() == "Deleted" || IsDeletePending())
+  {
+    return false;
+  }
+
+  return true;
+}
+
+bool MythProgramInfo::IsLiveTV()
+{
+  return (RecordingGroup() == "LiveTV");
+}
+
+unsigned int MythProgramInfo::ChannelID()
 {
   return cmyth_proginfo_chan_id(*m_proginfo_t);
 }
@@ -175,7 +220,7 @@ CStdString MythProgramInfo::RecordingGroup()
   return retval;
 }
 
-unsigned long MythProgramInfo::RecordID()
+unsigned int MythProgramInfo::RecordID()
 {
   return cmyth_proginfo_recordid(*m_proginfo_t);
 }
@@ -197,4 +242,37 @@ time_t MythProgramInfo::RecordingEndTime()
 int MythProgramInfo::Priority()
 {
   return cmyth_proginfo_priority(*m_proginfo_t); // Might want to use recpriority2 instead
+}
+
+CStdString MythProgramInfo::StorageGroup()
+{
+  char* storageGroup = cmyth_proginfo_storagegroup(*m_proginfo_t);
+  CStdString retval(storageGroup);
+  ref_release(storageGroup);
+  return retval;
+}
+
+void MythProgramInfo::SetFrameRate(const long long frameRate)
+{
+  m_frameRate = frameRate;
+}
+
+long long MythProgramInfo::FrameRate() const
+{
+  return m_frameRate;
+}
+
+CStdString MythProgramInfo::IconPath()
+{
+  return (BaseName() + ".png");
+}
+
+CStdString MythProgramInfo::Coverart() const
+{
+  return m_coverart;
+}
+
+CStdString MythProgramInfo::Fanart() const
+{
+  return m_fanart;
 }

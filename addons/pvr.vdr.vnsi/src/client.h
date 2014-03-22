@@ -21,8 +21,9 @@
  */
 
 #include "libXBMC_addon.h"
-#include "libXBMC_gui.h"
+#include "libXBMC_codec.h"
 #include "libXBMC_pvr.h"
+#include "libXBMC_gui.h"
 
 #define DEFAULT_HOST          "127.0.0.1"
 #define DEFAULT_PORT          34890
@@ -39,7 +40,9 @@ extern int          g_iConnectTimeout;    ///< Network connection / read timeout
 extern int          g_iPriority;          ///< The Priority this client have in response to other clients
 extern bool         g_bCharsetConv;       ///< Convert VDR's incoming strings to UTF8 character set
 extern bool         g_bHandleMessages;    ///< Send VDR's OSD status messages to XBMC OSD
+extern int          g_iTimeshift;
 
 extern ADDON::CHelper_libXBMC_addon *XBMC;
+extern CHelper_libXBMC_codec *CODEC;
 extern CHelper_libXBMC_gui   *GUI;
 extern CHelper_libXBMC_pvr   *PVR;

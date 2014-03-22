@@ -31,7 +31,7 @@
 
 class MythConnection;
 
-class FileOps : public PLATFORM::CThread, public PLATFORM::CMutex
+class FileOps : public PLATFORM::CThread
 {
 public:
   enum FileType
@@ -81,15 +81,15 @@ public:
     }
   }
 
-  static const int c_timeoutProcess       = 10;       // Wake the thread every 10s
-  static const int c_timeoutCacheCleaning = 60*60*24; // Clean the cache every 24h
+  static const int c_timeoutProcess              = 10;       // Wake the thread every 10s
+  static const int c_maximumAttemptsOnReadError  = 3;        // Retry when reading file failed
 
   FileOps(MythConnection &mythConnection);
   virtual ~FileOps();
 
-  CStdString GetArtworkPath(const CStdString &title, FileType fileType);
-  CStdString GetChannelIconPath(const CStdString &remotePath);
-  CStdString GetPreviewIconPath(const CStdString &remotePath);
+  CStdString GetArtworkPath(const CStdString &remoteFilename, FileType fileType);
+  CStdString GetChannelIconPath(const CStdString &remoteFilename);
+  CStdString GetPreviewIconPath(const CStdString &remoteFilename, const CStdString &storageGroup);
 
   void Suspend();
   void Resume();
@@ -97,17 +97,19 @@ public:
 protected:
   void* Process();
 
-  bool CacheFile(const CStdString &destination, MythFile &source);
+  void *OpenFile(const CStdString &localFilename);
+  bool CacheFile(void *destination, MythFile &source);
   void CleanCache();
 
   static CStdString GetFileName(const CStdString &path, char separator = PATH_SEPARATOR_CHAR);
   static CStdString GetDirectoryName(const CStdString &path, char separator = PATH_SEPARATOR_CHAR);
 
-  std::map<FileType, StorageGroupFileList> m_StorageGroupFileList;
-  std::map<FileType, std::time_t> m_StorageGroupFileListLastUpdated;
   std::map<CStdString, CStdString> m_icons;
   std::map<CStdString, CStdString> m_preview;
+  std::map<std::pair<FileType, CStdString>, CStdString> m_artworks;
+
   MythConnection m_con;
+  CStdString m_backendHostname;
 
   CStdString m_localBasePath;
 
@@ -116,14 +118,17 @@ protected:
       : m_localFilename(localFilename)
       , m_remoteFilename(remoteFilename)
       , m_storageGroup(storageGroup)
+      , m_errorCount(0)
     {
     }
 
     CStdString m_localFilename;
     CStdString m_remoteFilename;
     CStdString m_storageGroup;
+    int        m_errorCount;
   };
 
+  PLATFORM::CMutex m_lock;
   PLATFORM::CEvent m_queueContent;
   std::list<FileOps::JobItem> m_jobQueue;
 };

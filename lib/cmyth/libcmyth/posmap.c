@@ -30,8 +30,8 @@
 #include <cmyth_local.h>
 
 /*
- * cmyth_posmap_destroy(cmyth_posmap_t pm)
- * 
+ * cmyth_posmap_destroy()
+ *
  * Scope: PRIVATE (static)
  *
  * Description
@@ -48,7 +48,7 @@
 static void
 cmyth_posmap_destroy(cmyth_posmap_t pm)
 {
-	unsigned int i;
+	int i;
 
 	cmyth_dbg(CMYTH_DBG_DEBUG, "%s\n", __FUNCTION__);
 	if (!pm) {
@@ -63,8 +63,8 @@ cmyth_posmap_destroy(cmyth_posmap_t pm)
 }
 
 /*
- * cmyth_posmap_create(void)
- * 
+ * cmyth_posmap_create()
+ *
  * Scope: PUBLIC
  *
  * Description
@@ -91,4 +91,22 @@ cmyth_posmap_create(void)
 	ret->posmap_count = 0;
 	ret->posmap_list = NULL;
 	return ret;
+}
+
+int
+cmyth_posmap_count(cmyth_posmap_t pm)
+{
+	if (pm)
+		return pm->posmap_count;
+	else
+		return 0;
+}
+
+cmyth_keyframe_t
+cmyth_posmap_keyframe(cmyth_posmap_t pm, int index)
+{
+	if (pm && pm->posmap_count > index)
+		return ref_hold(pm->posmap_list[index]);
+	else
+		return NULL;
 }

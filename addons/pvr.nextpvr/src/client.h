@@ -26,6 +26,7 @@
 #include "platform/util/StdString.h"
 #include "libXBMC_addon.h"
 #include "libXBMC_pvr.h"
+#include "libXBMC_gui.h"
 
 enum eStreamingMethod
 {
@@ -51,6 +52,7 @@ extern bool             g_bUseTimeshift;
 
 extern ADDON::CHelper_libXBMC_addon *XBMC;
 extern CHelper_libXBMC_pvr          *PVR;
+extern CHelper_libXBMC_gui          *GUI;
 
 extern int              g_iTVServerXBMCBuild;
 

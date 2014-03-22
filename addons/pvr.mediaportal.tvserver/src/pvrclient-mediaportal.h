@@ -32,7 +32,7 @@
 /* Use a forward declaration here. Including RTSPClient.h via TSReader.h at this point gives compile errors */
 class CTsReader;
 
-class cPVRClientMediaPortal
+class cPVRClientMediaPortal: public PLATFORM::PreventCopy
 {
 public:
   /* Class interface */
@@ -43,7 +43,7 @@ public:
   static void* Process(void*);
 
   /* Server handling */
-  bool Connect();
+  ADDON_STATUS Connect();
   void Disconnect();
   bool IsUp();
 
@@ -72,6 +72,8 @@ public:
   PVR_ERROR DeleteRecording(const PVR_RECORDING &recording);
   PVR_ERROR RenameRecording(const PVR_RECORDING &recording);
   PVR_ERROR SetRecordingPlayCount(const PVR_RECORDING &recording, int count);
+  PVR_ERROR SetRecordingLastPlayedPosition(const PVR_RECORDING &recording, int lastplayedposition);
+  int GetRecordingLastPlayedPosition(const PVR_RECORDING &recording);
 
   /* Timer handling */
   int GetNumTimers(void);
@@ -108,7 +110,8 @@ protected:
 
 private:
   bool GetChannel(unsigned int number, PVR_CHANNEL &channeldata);
-  bool LoadGenreXML(const std::string &filename);
+  void LoadGenreTable(void);
+  void LoadCardSettings(void);
 
   int                     m_iCurrentChannel;
   int                     m_iCurrentCard;
@@ -127,14 +130,9 @@ private:
   int64_t                 m_iLastRecordingUpdate;
   CTsReader*              m_tsreader;
 
-  char                    m_noSignalStreamData[ 6 + 0xffff ];
-  long                    m_noSignalStreamSize;
-  long                    m_noSignalStreamReadPos;
-  bool                    m_bPlayingNoSignal;
-
   void Close();
 
   //Used for TV Server communication:
   std::string SendCommand(std::string command);
-  bool SendCommand2(std::string command, int& code, std::vector<std::string>& lines);
+  bool SendCommand2(std::string command, std::vector<std::string>& lines);
 };

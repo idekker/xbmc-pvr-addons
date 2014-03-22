@@ -31,19 +31,13 @@
 #include <sys/types.h>
 #include <cmyth_local.h>
 
-#define LAST 0x7FFFFFFF
-
 static int cmyth_livetv_chain_has_url(cmyth_recorder_t rec, char * url);
-static int cmyth_livetv_chain_add_file(cmyth_recorder_t rec,
-                                       char * url, cmyth_file_t fp);
-static int cmyth_livetv_chain_add_url(cmyth_recorder_t rec, char * url);
-static int cmyth_livetv_chain_add(cmyth_recorder_t rec, char * url,
-                                  cmyth_file_t fp, cmyth_proginfo_t prog);
+static int cmyth_livetv_chain_add(cmyth_recorder_t rec, char * url, cmyth_file_t file, cmyth_proginfo_t prog);
 
 
 /*
- * cmyth_livetv_chain_destroy(cmyth_livetv_chain_t ltc)
- * 
+ * cmyth_livetv_chain_destroy()
+ *
  * Scope: PRIVATE (static)
  *
  * Description
@@ -71,19 +65,19 @@ cmyth_livetv_chain_destroy(cmyth_livetv_chain_t ltc)
 		ref_release(ltc->chainid);
 	}
 	if (ltc->chain_urls) {
-		for(i=0;i<ltc->chain_ct; i++)
+		for (i = 0; i < ltc->chain_ct; i++)
 			if (ltc->chain_urls[i])
 				ref_release(ltc->chain_urls[i]);
 		ref_release(ltc->chain_urls);
 	}
 	if (ltc->chain_files) {
-		for(i=0;i<ltc->chain_ct; i++)
+		for (i = 0; i < ltc->chain_ct; i++)
 			if (ltc->chain_files[i])
 				ref_release(ltc->chain_files[i]);
 		ref_release(ltc->chain_files);
 	}
 	if (ltc->progs) {
-		for(i=0;i<ltc->chain_ct; i++)
+		for (i = 0; i < ltc->chain_ct; i++)
 			if (ltc->progs[i])
 				ref_release(ltc->progs[i]);
 		ref_release(ltc->progs);
@@ -91,8 +85,8 @@ cmyth_livetv_chain_destroy(cmyth_livetv_chain_t ltc)
 }
 
 /*
- * cmyth_livetv_chain_create(void)
- * 
+ * cmyth_livetv_chain_create()
+ *
  * Scope: PUBLIC
  *
  * Description
@@ -122,7 +116,8 @@ cmyth_livetv_chain_create(char * chainid)
 	ret->chain_urls = NULL;
 	ret->chain_files = NULL;
 	ret->progs = NULL;
-	ret->livetv_watch = 0; /* JLB: Manage program breaks. Set to 1 on chain setup */
+	ret->livetv_watch = 0; /* JLB: Manage program breaks */
+	ret->livetv_buflen = 0;
 	ret->livetv_tcp_rcvbuf = 0;
 	ret->livetv_block_len = 0;
 	ref_set_destroy(ret, (ref_destroy_t)cmyth_livetv_chain_destroy);
@@ -130,12 +125,8 @@ cmyth_livetv_chain_create(char * chainid)
 }
 
 /*
-	Returns the index of the chain entry with the URL or 0 if the
-	URL isn't there.
-*/
-/*
- * cmyth_livetv_chain_has_url(void)
- * 
+ * cmyth_livetv_chain_has_url()
+ *
  * Scope: PRIVATE
  *
  * Description
@@ -150,177 +141,63 @@ cmyth_livetv_chain_create(char * chainid)
  *
  * Failure: -1 if the URL doesn't appear in the chain.
  */
-int cmyth_livetv_chain_has_url(cmyth_recorder_t rec, char * url)
+static int
+cmyth_livetv_chain_has_url(cmyth_recorder_t rec, char * url)
 {
 	int found, i;
 	found = 0;
-	if(rec->rec_livetv_chain) {
-		if(rec->rec_livetv_chain->chain_current != -1) {
-			for(i=0;i<rec->rec_livetv_chain->chain_ct; i++) {
-				if(strcmp(rec->rec_livetv_chain->chain_urls[i],url) == 0) {
+	if (rec->rec_livetv_chain) {
+		if (rec->rec_livetv_chain->chain_ct > 0) {
+			for (i = 0; i < rec->rec_livetv_chain->chain_ct; i++) {
+				if (strcmp(rec->rec_livetv_chain->chain_urls[i], url) == 0) {
 					found = 1;
 					break;
 				}
 			}
 		}
 	}
-	return found?i:-1;
+	return (found ? i : -1);
 }
-
-#if 0
-static int cmyth_livetv_chain_current(cmyth_recorder_t rec);
-int
-cmyth_livetv_chain_current(cmyth_recorder_t rec)
-{
-	return rec->rec_livetv_chain->chain_current;
-}
-
-static cmyth_file_t cmyth_livetv_get_cur_file(cmyth_recorder_t rec);
-cmyth_file_t
-cmyth_livetv_get_cur_file(cmyth_recorder_t rec)
-{
-	return rec->rec_livetv_file;
-}
-#endif
 
 /*
- * cmyth_livetv_chain_add_file(cmyth_recorder_t rec, char * url,
- *                             cmyth_file_t fp)
- * 
+ * cmyth_livetv_chain_add()
+ *
  * Scope: PRIVATE
  *
  * Description
  *
- * Called to add a file handle to a livetv chain structure. The handle is added
- * only if the url is already there.
+ * Called to add a url and file pointer to a livetv chain structure.
+ * The url is added only if it is not already there. The file pointer
+ * will be held (ref count increased) by this call if successful.
  *
  * Return Value:
  *
- * Success: 0
+ * Success: The index of the new entry in the chain
  *
- * Faiure: -1
+ * Failure: -1 if url alread exists else -errno
  */
 static int
-cmyth_livetv_chain_add_file(cmyth_recorder_t rec, char * url, cmyth_file_t ft)
-{
-
-	int cur;
-	int ret = 0;
-	cmyth_file_t tmp;
-
-	if(rec->rec_livetv_chain) {
-		if(rec->rec_livetv_chain->chain_current != -1) {
-			/* Is this file already in the chain? */
-			if((cur = cmyth_livetv_chain_has_url(rec, url)) != -1) {
-				/* Release the existing handle after holding the new */
-				/* this allows them to be the same. */
-				tmp = rec->rec_livetv_chain->chain_files[cur];
-				rec->rec_livetv_chain->chain_files[cur] = ref_hold(ft);
-				ref_release(tmp);
-			}
-		}
-		else {
-			cmyth_dbg(CMYTH_DBG_ERROR,
-			 		"%s: attempted to add file for %s to an empty chain\n",
-			 		__FUNCTION__, url);
-			ret = -1;
-		}
-	}
-	else {
-		cmyth_dbg(CMYTH_DBG_ERROR,
-		 		"%s: attempted to add file for %s to an non existant chain\n",
-		 		__FUNCTION__, url);
-		ret = -1;
-	}
-	return ret;
-}
-
-/*
- * cmyth_livetv_chain_add_prog(cmyth_recorder_t rec, char * url,
- *                             cmyth_proginfo_t prog)
- * 
- * Scope: PRIVATE
- *
- * Description
- *
- * Called to add program info to a livetv chain structure. The info is added
- * only if the url is already there.
- *
- * Return Value:
- *
- * Success: 0
- *
- * Faiure: -1
- */
-static int
-cmyth_livetv_chain_add_prog(cmyth_recorder_t rec, char * url,
-														cmyth_proginfo_t prog)
-{
-
-	int cur;
-	int ret = 0;
-	cmyth_proginfo_t tmp;
-
-	if(rec->rec_livetv_chain) {
-		if(rec->rec_livetv_chain->chain_current != -1) {
-			/* Is this file already in the chain? */
-			if((cur = cmyth_livetv_chain_has_url(rec, url)) != -1) {
-				/* Release the existing handle after holding the new */
-				/* this allows them to be the same. */
-				tmp = rec->rec_livetv_chain->progs[cur];
-				rec->rec_livetv_chain->progs[cur] = ref_hold(prog);
-				ref_release(tmp);
-			}
-		}
-		else {
-			cmyth_dbg(CMYTH_DBG_ERROR,
-			 		"%s: attempted to add prog for %s to an empty chain\n",
-			 		__FUNCTION__, url);
-			ret = -1;
-		}
-	}
-	else {
-		cmyth_dbg(CMYTH_DBG_ERROR,
-		 		"%s: attempted to add prog for %s to an non existant chain\n",
-		 		__FUNCTION__, url);
-		ret = -1;
-	}
-	return ret;
-}
-
-/*
- * cmyth_livetv_chain_add_url(cmyth_recorder_t rec, char * url)
- * 
- * Scope: PRIVATE
- *
- * Description
- *
- * Called to add a url to a livetv chain structure. The url is added
- * only if it is not already there.
- *
- * Return Value:
- *
- * Success: 0
- *
- * Faiure: -1
- */
-static int
-cmyth_livetv_chain_add_url(cmyth_recorder_t rec, char * url)
+cmyth_livetv_chain_add(cmyth_recorder_t rec, char * url, cmyth_file_t file, cmyth_proginfo_t prog)
 {
 	char ** tmp;
 	cmyth_file_t * fp;
 	cmyth_proginfo_t * pi;
-	int ret = 0;
+	int ret;
 
-	if(cmyth_livetv_chain_has_url(rec,url) == -1) {
-		if(rec->rec_livetv_chain->chain_current == -1) {
+	if (cmyth_livetv_chain_has_url(rec, url) >= 0) {
+		/* url already exists in the chain */
+		ret = -1;
+	}
+	else
+	{
+		/* Nothing in the chain yet, allocate the space */
+		if (rec->rec_livetv_chain->chain_ct == 0) {
 			rec->rec_livetv_chain->chain_ct = 1;
-			rec->rec_livetv_chain->chain_current = 0;
-			/* Nothing in the chain yet, allocate the space */
 			tmp = (char**)ref_alloc(sizeof(char *));
 			fp = (cmyth_file_t *)ref_alloc(sizeof(cmyth_file_t));
 			pi = (cmyth_proginfo_t *)ref_alloc(sizeof(cmyth_proginfo_t));
 		}
+		/* Reallocate space for the new url */
 		else {
 			rec->rec_livetv_chain->chain_ct++;
 			tmp = (char**)ref_realloc(rec->rec_livetv_chain->chain_urls,
@@ -332,22 +209,28 @@ cmyth_livetv_chain_add_url(cmyth_recorder_t rec, char * url)
 					ref_realloc(rec->rec_livetv_chain->progs,
 								sizeof(cmyth_proginfo_t)*rec->rec_livetv_chain->chain_ct);
 		}
-		if(tmp != NULL && fp != NULL) {
-			rec->rec_livetv_chain->chain_urls = ref_hold(tmp);
-			rec->rec_livetv_chain->chain_files = ref_hold(fp);
-			rec->rec_livetv_chain->progs = ref_hold(pi);
-			ref_release(tmp);
-			ref_release(fp);
-			ref_release(pi);
-			rec->rec_livetv_chain->chain_urls[rec->rec_livetv_chain->chain_ct-1]
-							= ref_strdup(url);
-			rec->rec_livetv_chain->chain_files[rec->rec_livetv_chain->chain_ct-1]
-							= ref_hold(NULL);
-			rec->rec_livetv_chain->progs[rec->rec_livetv_chain->chain_ct-1]
-							= ref_hold(NULL);
+		if (tmp != NULL && fp != NULL && pi != NULL) {
+			int pos = rec->rec_livetv_chain->chain_ct - 1;
+			rec->rec_livetv_chain->chain_urls = tmp;
+			rec->rec_livetv_chain->chain_files = fp;
+			rec->rec_livetv_chain->progs = pi;
+			rec->rec_livetv_chain->chain_urls[pos] = ref_strdup(url);
+			rec->rec_livetv_chain->chain_files[pos] = ref_hold(file);
+			rec->rec_livetv_chain->progs[pos] = ref_hold(prog);
+			/* Url added. Return index of the new entry */
+			ret = pos;
 		}
 		else {
-			ret = -1;
+			if (tmp)
+				ref_release(tmp);
+
+			if (fp)
+				ref_release(fp);
+
+			if (pi)
+				ref_release(pi);
+
+			ret = -ENOMEM;
 			cmyth_dbg(CMYTH_DBG_ERROR,
 			 		"%s: memory allocation request failed\n",
 			 		__FUNCTION__);
@@ -358,41 +241,8 @@ cmyth_livetv_chain_add_url(cmyth_recorder_t rec, char * url)
 }
 
 /*
- * cmyth_livetv_chain_add(cmyth_recorder_t rec, char * url, cmyth_file_t ft)
- * 
- * Scope: PRIVATE
+ * cmyth_livetv_chain_update()
  *
- * Description
- *
- * Called to add a url and file pointer to a livetv chain structure.
- * The url is added only if it is not already there. The file pointer
- * will be held (ref count increased) by this call if successful.
- *
- * Return Value:
- *
- * Success: 0
- *
- * Faiure: -1
- */
-int
-cmyth_livetv_chain_add(cmyth_recorder_t rec, char * url, cmyth_file_t ft,
-											 cmyth_proginfo_t pi)
-{
-	int ret = 0;
-
-	if(cmyth_livetv_chain_has_url(rec, url) == -1)
-		ret = cmyth_livetv_chain_add_url(rec, url);
-	if(ret != -1)
-		ret = cmyth_livetv_chain_add_file(rec, url, ft);
-	if(ret != -1)
-		ret = cmyth_livetv_chain_add_prog(rec, url, pi);
-
-	return ret;
-}
-
-/*
- * cmyth_livetv_chain_update(cmyth_recorder_t rec, char * chainid, int buff)
- * 
  * Scope: PUBLIC
  *
  * Description
@@ -413,45 +263,32 @@ cmyth_livetv_chain_update(cmyth_recorder_t rec, char * chainid)
 {
 	int ret;
 	char url[1024];
-	cmyth_proginfo_t loc_prog;
+	cmyth_proginfo_t loc_prog = NULL;
 	cmyth_file_t ft = NULL;
 
 	ret = 0;
 
-  if (!rec) {
-		cmyth_dbg(CMYTH_DBG_ERROR, "%s: rec is NULL\n", __FUNCTION__);
-		return -1;
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return -EINVAL;
 	}
 
-	/* JLB: Manage program break
-	 * Skip chain update, it will doing later
-	 */
 	if (!rec->rec_livetv_chain) {
 		cmyth_dbg(CMYTH_DBG_ERROR,
 			  "%s: rec_livetv_chain is NULL\n",
-			  __FUNCTION__, url);
-		return -1;
-	}
-	else {
-		if (rec->rec_livetv_chain->livetv_watch != 1) {
-			cmyth_dbg(CMYTH_DBG_DEBUG,
-				  "%s: the next program is awaited: skip chain update\n",
-				  __FUNCTION__);
-			return 0;
-		}
-	}
-
-	loc_prog = cmyth_recorder_get_cur_proginfo(rec);
-	if (!loc_prog) {
-		cmyth_dbg(CMYTH_DBG_ERROR,
-			  "%s: recorder is not recording\n",
 			  __FUNCTION__);
 		return -1;
 	}
 
-	pthread_mutex_lock(&mutex);
-
 	if (strncmp(rec->rec_livetv_chain->chainid, chainid, strlen(chainid)) == 0) {
+		loc_prog = cmyth_recorder_get_cur_proginfo(rec);
+		if (!loc_prog) {
+			cmyth_dbg(CMYTH_DBG_ERROR,
+				  "%s: recorder is not recording\n",
+				  __FUNCTION__);
+			ret = -1;
+			goto out;
+		}
 		sprintf(url, "myth://%s:%d%s", loc_prog->proginfo_hostname, rec->rec_port,
 				loc_prog->proginfo_pathname);
 
@@ -461,7 +298,7 @@ cmyth_livetv_chain_update(cmyth_recorder_t rec, char * chainid)
 		*/
 
 		if (cmyth_livetv_chain_has_url(rec, url) == -1) {
-			ft = cmyth_conn_connect_file(loc_prog, rec->rec_conn, 4096, rec->rec_livetv_chain->livetv_tcp_rcvbuf);
+			ft = cmyth_conn_connect_file(loc_prog, rec->rec_conn, rec->rec_livetv_chain->livetv_buflen, rec->rec_livetv_chain->livetv_tcp_rcvbuf);
 			if (!ft) {
 				cmyth_dbg(CMYTH_DBG_ERROR,
 					  "%s: cmyth_conn_connect_file(%s) failed\n",
@@ -476,17 +313,25 @@ cmyth_livetv_chain_update(cmyth_recorder_t rec, char * chainid)
 			 * add a valid program.
 			 */
 			if (cmyth_file_is_open(ft) > 0) {
-				if(cmyth_livetv_chain_add(rec, url, ft, loc_prog) == -1) {
+				if (cmyth_livetv_chain_add(rec, url, ft, loc_prog) < 0) {
 					cmyth_dbg(CMYTH_DBG_ERROR,
 						  "%s: cmyth_livetv_chain_add(%s) failed\n",
 						  __FUNCTION__, url);
 					ret = -1;
 					goto out;
 				}
-				if (rec->rec_livetv_chain->chain_switch_on_create) {
-					cmyth_livetv_chain_switch(rec, LAST);
+				/*
+				 * New program is inserted. Switch OFF watch signal and
+				 * switch to the new file when required.
+				 */
+				rec->rec_livetv_chain->livetv_watch = 0;
+				if (rec->rec_livetv_chain->chain_switch_on_create
+					&& cmyth_livetv_chain_switch_last(rec) == 1) {
 					rec->rec_livetv_chain->chain_switch_on_create = 0;
 				}
+				cmyth_dbg(CMYTH_DBG_INFO,
+					  "%s: chain count is %d\n",
+					  __FUNCTION__, rec->rec_livetv_chain->chain_ct);
 			}
 			else {
 				ret = -1;
@@ -495,13 +340,12 @@ cmyth_livetv_chain_update(cmyth_recorder_t rec, char * chainid)
 	}
 	else {
 		cmyth_dbg(CMYTH_DBG_ERROR,
-				  "%s: chainid doesn't match recorder's chainid!!\n",
-				  __FUNCTION__, url);
+				  "%s: chainid doesn't match recorder's chainid\n",
+				  __FUNCTION__);
 		ret = -1;
 	}
 
 out:
-	pthread_mutex_unlock(&mutex);
 	ref_release(ft);
 	ref_release(loc_prog);
 
@@ -509,7 +353,7 @@ out:
 }
 
 /* JLB: Manage program breaks
- * cmyth_livetv_watch(cmyth_recorder_t rec, char * msg)
+ * cmyth_livetv_watch()
  *
  * Scope: PUBLIC
  *
@@ -535,31 +379,29 @@ out:
 int
 cmyth_livetv_watch(cmyth_recorder_t rec, char * msg)
 {
-	int rec_id;
-	int watch;
+	uint32_t rec_id;
+	int flag;
 	int ret;
 
 	ret = 0;
 
 	if (!rec) {
-		cmyth_dbg(CMYTH_DBG_ERROR, "%s: rec is NULL\n", __FUNCTION__);
-		return -1;
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return -EINVAL;
 	}
 	/*
-	 * Parse msg. Should be %d %d
+	 * Parse msg. Should be %ld %d
 	 */
-	if (strlen(msg)>=3 && sscanf(msg,"%d %d", &rec_id, &watch) == 2) {
+	if (strlen(msg) >= 3 && sscanf(msg,"%"PRIu32" %d", &rec_id, &flag) == 2) {
 		if (rec_id == rec->rec_id) {
-			pthread_mutex_lock(&mutex);
-			rec->rec_livetv_chain->livetv_watch = watch;
-			pthread_mutex_unlock(&mutex);
+			rec->rec_livetv_chain->livetv_watch = 1;
 			cmyth_dbg(CMYTH_DBG_DEBUG,
-				  "%s: recorder watch: %d\n",
-				  __FUNCTION__, watch);
+				  "%s: wait event for recorder: %"PRIu32"\n",
+				  __FUNCTION__, rec_id);
 		}
 		else {
 			cmyth_dbg(CMYTH_DBG_DEBUG,
-				  "%s: nothing to trigger for recorder: %d",
+				  "%s: nothing to trigger for recorder: %"PRIu32"\n",
 				  __FUNCTION__, rec_id);
 		}
 	}
@@ -574,7 +416,7 @@ cmyth_livetv_watch(cmyth_recorder_t rec, char * msg)
 }
 
 /* JLB: Manage program breaks
- * cmyth_livetv_done_recording(cmyth_recorder_t rec, char * msg)
+ * cmyth_livetv_done_recording()
  *
  * Scope: PUBLIC
  *
@@ -582,9 +424,9 @@ cmyth_livetv_watch(cmyth_recorder_t rec, char * msg)
  *
  * Indicates that an active recording has completed on the specified
  * recorder. used to manage program breaks while watching live tv.
- * When receive event for recorder, we switch on watch signal and
- * force an update of livetv chain to get current program info.
- * Watch signal is used when down, to mark the break period and
+ * When receive event for recorder, we force an update of livetv chain
+ * to get current program info when chain is not yet updated.
+ * Watch signal is used when up, to mark the break period and
  * queuing the frontend for reading file buffer.
  *
  * Return Value:
@@ -596,45 +438,52 @@ cmyth_livetv_watch(cmyth_recorder_t rec, char * msg)
 int
 cmyth_livetv_done_recording(cmyth_recorder_t rec, char * msg)
 {
-	int ret, rec_id;
+	uint32_t rec_id;
+	int ret;
 
 	ret = 0;
 
 	if (!rec) {
-		cmyth_dbg(CMYTH_DBG_ERROR, "%s: rec is NULL\n", __FUNCTION__);
-		return -1;
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return -EINVAL;
 	}
 	/*
-	 * Parse msg. Should be %d ...
+	 * Parse msg. Should be 'recordid ...'
 	 */
-	if (strlen(msg) >= 1 && sscanf(msg,"%d", &rec_id) == 1) {
+	if (strlen(msg) >= 1 && sscanf(msg,"%"PRIu32, &rec_id) == 1) {
 		if (rec_id == rec->rec_id
-			&& rec->rec_livetv_chain->livetv_watch != 1
-			&& cmyth_recorder_is_recording(rec) == 1)
-		{
+			&& rec->rec_livetv_chain->livetv_watch == 1
+			&& cmyth_recorder_is_recording(rec) == 1) {
 			/*
-			 * Last recording is now completed. Then switch ON watch status
-			 * and force live tv chain update for the new current program.
+			 * Last recording is now completed but watch signal is ON.
+			 * Then force live tv chain update for the new current
+			 * program. We will retry 3 times before returning.
 			 */
-			pthread_mutex_lock(&mutex);
-			rec->rec_livetv_chain->livetv_watch = 1;
-			pthread_mutex_unlock(&mutex);
 			cmyth_dbg(CMYTH_DBG_DEBUG,
 				  "%s: previous recording done. Start chain update\n",
 				  __FUNCTION__);
-			if (rec->rec_livetv_chain->chainid) {
-				cmyth_livetv_chain_update(rec, rec->rec_livetv_chain->chainid);
+			ret = -1;
+			if (rec->rec_livetv_chain->chainid && rec->rec_livetv_chain->chain_ct > 0) {
+				int i;
+				for (i = 0; i < 3; i++) {
+					if (cmyth_livetv_chain_update(rec, rec->rec_livetv_chain->chainid) < 0)
+						break;
+					if (rec->rec_livetv_chain->livetv_watch == 0) {
+						ret = 0;
+						break;
+					}
+					usleep(100000);
+				}
 			}
 			else {
 				cmyth_dbg(CMYTH_DBG_ERROR,
-					  "%s: chainid is null for recorder %d\n",
+					  "%s: chainid is null for recorder %"PRIu32"\n",
 					  __FUNCTION__, rec_id);
-				ret = -1;
 			}
 		}
 		else {
 			cmyth_dbg(CMYTH_DBG_DEBUG,
-				  "%s: nothing to trigger for recorder: %d",
+				  "%s: nothing to trigger for recorder: %"PRIu32"\n",
 				  __FUNCTION__, rec_id);
 		}
 	}
@@ -649,8 +498,8 @@ cmyth_livetv_done_recording(cmyth_recorder_t rec, char * msg)
 }
 
 /*
- * cmyth_livetv_chain_setup(cmyth_recorder_t old_rec)
- * 
+ * cmyth_livetv_chain_setup()
+ *
  * Scope: PUBLIC
  *
  * Description
@@ -669,23 +518,20 @@ cmyth_livetv_done_recording(cmyth_recorder_t rec, char * msg)
  *					caller needs to do this on a failure.
  */
 cmyth_recorder_t
-cmyth_livetv_chain_setup(cmyth_recorder_t rec, int tcp_rcvbuf,
-			 void (*prog_update_callback)(cmyth_proginfo_t))
+cmyth_livetv_chain_setup(cmyth_recorder_t rec, uint32_t buflen, int32_t tcp_rcvbuf,
+	void (*prog_update_callback)(cmyth_proginfo_t))
 {
 
 	cmyth_recorder_t new_rec = NULL;
 	char url[1024];
-	cmyth_conn_t control;
 	cmyth_proginfo_t loc_prog;
 	cmyth_file_t ft = NULL;
 
 	if (!rec) {
-		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n",
-			  __FUNCTION__);
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
 		return NULL;
 	}
 
-	control = rec->rec_conn;
 	/* Get the current recording information */
 	loc_prog = cmyth_recorder_get_cur_proginfo(rec);
 
@@ -695,8 +541,6 @@ cmyth_livetv_chain_setup(cmyth_recorder_t rec, int tcp_rcvbuf,
 		goto out;
 	}
 
-	pthread_mutex_lock(&mutex);
-
 	new_rec = cmyth_recorder_dup(rec);
 	if (new_rec == NULL) {
 		cmyth_dbg(CMYTH_DBG_DEBUG, "%s: cannot create recorder\n",
@@ -705,29 +549,32 @@ cmyth_livetv_chain_setup(cmyth_recorder_t rec, int tcp_rcvbuf,
 	}
 	ref_release(rec);
 
-	if(new_rec->rec_livetv_chain == NULL) {
+	if (new_rec->rec_livetv_chain == NULL) {
 		cmyth_dbg(CMYTH_DBG_DEBUG, "%s: error no livetv_chain\n",
 			  __FUNCTION__);
+		ref_release(new_rec);
 		new_rec = NULL;
 		goto out;
 	}
 
 	/* JLB: Set tcp receive buffer for the chain files */
+	new_rec->rec_livetv_chain->livetv_buflen = buflen;
 	new_rec->rec_livetv_chain->livetv_tcp_rcvbuf = tcp_rcvbuf;
-	/* JLB: Manage program breaks. Switch ON watch signal */
-	new_rec->rec_livetv_chain->livetv_watch = 1;
+	/* JLB: Manage program breaks. Switch OFF watch signal */
+	new_rec->rec_livetv_chain->livetv_watch = 0;
 
 	new_rec->rec_livetv_chain->prog_update_callback = prog_update_callback;
 
-	sprintf(url, "myth://%s:%d%s", loc_prog->proginfo_hostname, rec->rec_port,
+	sprintf(url, "myth://%s:%d%s", loc_prog->proginfo_hostname, new_rec->rec_port,
 				loc_prog->proginfo_pathname);
 
-	if(cmyth_livetv_chain_has_url(new_rec, url) == -1) {
-		ft = cmyth_conn_connect_file(loc_prog, new_rec->rec_conn, 4096, new_rec->rec_livetv_chain->livetv_tcp_rcvbuf);
+	if (cmyth_livetv_chain_has_url(new_rec, url) == -1) {
+		ft = cmyth_conn_connect_file(loc_prog, new_rec->rec_conn, new_rec->rec_livetv_chain->livetv_buflen, new_rec->rec_livetv_chain->livetv_tcp_rcvbuf);
 		if (!ft) {
 			cmyth_dbg(CMYTH_DBG_ERROR,
 				  "%s: cmyth_conn_connect_file(%s) failed\n",
 				  __FUNCTION__, url);
+			ref_release(new_rec);
 			new_rec = NULL;
 			goto out;
 		}
@@ -738,15 +585,17 @@ cmyth_livetv_chain_setup(cmyth_recorder_t rec, int tcp_rcvbuf,
 		 * add a valid program.
 		 */
 		if (cmyth_file_is_open(ft) > 0) {
-			if(cmyth_livetv_chain_add(new_rec, url, ft, loc_prog) == -1) {
+			if (cmyth_livetv_chain_add(new_rec, url, ft, loc_prog) < 0) {
 				cmyth_dbg(CMYTH_DBG_ERROR,
 					  "%s: cmyth_livetv_chain_add(%s) failed\n",
 					  __FUNCTION__, url);
+				ref_release(new_rec);
 				new_rec = NULL;
+				goto out;
 			}
 			else {
 				/* now switch to the valid program */
-				cmyth_livetv_chain_switch(new_rec, 0);
+				cmyth_livetv_chain_switch_last(new_rec);
 				new_rec->rec_livetv_chain->chain_switch_on_create = 0;
 			}
 		}
@@ -760,7 +609,6 @@ cmyth_livetv_chain_setup(cmyth_recorder_t rec, int tcp_rcvbuf,
 	}
 
     out:
-	pthread_mutex_unlock(&mutex);
 	ref_release(ft);
 	ref_release(loc_prog);
 
@@ -768,45 +616,36 @@ cmyth_livetv_chain_setup(cmyth_recorder_t rec, int tcp_rcvbuf,
 }
 
 /*
- * cmyth_livetv_chain_get_block(cmyth_recorder_t rec, char *buf,
- *															unsigned long len)
- * Scope: PUBLIC
+ * cmyth_livetv_chain_get_block()
+ *
+ * Scope: PRIVATE
+ *
  * Description
+ *
  * Read incoming file data off the network into a buffer of length len.
  *
  * Return Value:
+ *
  * Sucess: number of bytes read into buf
- * Failure: -1
+ *
+ * Failure: an int containing -errno
  */
-int
-cmyth_livetv_chain_get_block(cmyth_recorder_t rec, char *buf,
-															unsigned long len)
+static int32_t
+cmyth_livetv_chain_get_block(cmyth_recorder_t rec, char *buf, int32_t len)
 {
-	if (!rec) {
-		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no connection\n",
-			  __FUNCTION__);
-		return -EINVAL;
-	}
-
-  return cmyth_file_get_block(rec->rec_livetv_file, buf, len);
+	return cmyth_file_get_block(rec->rec_livetv_file, buf, len);
 }
 
 static int
 cmyth_livetv_chain_select(cmyth_recorder_t rec, struct timeval *timeout)
 {
-	if (!rec) {
-		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no connection\n",
-			  __FUNCTION__);
-		return -EINVAL;
-	}
-
-  return cmyth_file_select(rec->rec_livetv_file, timeout);
+	return cmyth_file_select(rec->rec_livetv_file, timeout);
 }
 
 
 /*
- * cmyth_livetv_chain_switch(cmyth_recorder_t rec, int dir)
- * 
+ * cmyth_livetv_chain_switch()
+ *
  * Scope: PUBLIC
  *
  * Description
@@ -824,14 +663,19 @@ int
 cmyth_livetv_chain_switch(cmyth_recorder_t rec, int dir)
 {
 	int ret, i;
+	cmyth_file_t oldfile = NULL;
+
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return -EINVAL;
+	}
+
+	if (dir == 0)
+		return 1;
+
+	pthread_mutex_lock(&rec->rec_conn->conn_mutex);
 
 	ret = 0;
-
-	if(dir == LAST) {
-		dir = rec->rec_livetv_chain->chain_ct
-				- rec->rec_livetv_chain->chain_current - 1;
-		ret = 1;
-	}
 
 	cmyth_dbg(CMYTH_DBG_DEBUG, "%s: switch file: current=%d , dir=%d\n",
 		  __FUNCTION__, rec->rec_livetv_chain->chain_current, dir);
@@ -842,33 +686,34 @@ cmyth_livetv_chain_switch(cmyth_recorder_t rec, int dir)
 			  "%s: no more file\n",
 			  __FUNCTION__);
 		/* JLB: Manage program breaks
-		 * If livetv_watch is down then we are waiting next chain update and adding a new file.
+		 * If livetv_watch is ON then we are waiting next chain update and adding a new file.
 		 * Timeout is 2 secondes before release.
 		 */
-		if (rec->rec_livetv_chain->livetv_watch != 1) {
+		if (rec->rec_livetv_chain->livetv_watch != 0) {
 			cmyth_dbg(CMYTH_DBG_ERROR,
-				  "%s: wait until livetv_watch is up\n",
+				  "%s: wait until livetv_watch is OFF\n",
 				  __FUNCTION__);
 			for (i = 0; i < 4; i++) {
-				pthread_mutex_unlock(&mutex);
+				pthread_mutex_unlock(&rec->rec_conn->conn_mutex);
 				usleep(500000);
-				pthread_mutex_lock(&mutex);
-				if (rec->rec_livetv_chain->livetv_watch == 1)
+				pthread_mutex_lock(&rec->rec_conn->conn_mutex);
+				if (rec->rec_livetv_chain->livetv_watch == 0)
 					break;
 			}
-			if (rec->rec_livetv_chain->livetv_watch != 1) {
+			if (rec->rec_livetv_chain->livetv_watch != 0) {
 				/* The chain is not updated yet
 				 * Return to retry later
 				 */
-				return 0;
+				ret = 0;
+				goto out;
 			}
 		}
 	}
 
-	if((dir < 0 && rec->rec_livetv_chain->chain_current + dir >= 0)
+	if ((dir < 0 && rec->rec_livetv_chain->chain_current + dir >= 0)
 		|| (rec->rec_livetv_chain->chain_current <
 			  rec->rec_livetv_chain->chain_ct - dir)) {
-		ref_release(rec->rec_livetv_file);
+		oldfile = rec->rec_livetv_file;
 		ret = rec->rec_livetv_chain->chain_current += dir;
 		rec->rec_livetv_file = ref_hold(rec->rec_livetv_chain->chain_files[ret]);
 		cmyth_dbg(CMYTH_DBG_DEBUG, "%s: file switch to %d\n",__FUNCTION__,ret);
@@ -879,47 +724,36 @@ cmyth_livetv_chain_switch(cmyth_recorder_t rec, int dir)
 		ret = 1;
 	}
 
+	out:
+
+	pthread_mutex_unlock(&rec->rec_conn->conn_mutex);
+	if (oldfile)
+		ref_release(oldfile);
 	return ret;
 }
 
-/* for calls from other modules where the mutex isn't set */
 int
 cmyth_livetv_chain_switch_last(cmyth_recorder_t rec)
 {
 	int dir;
 
 	if (!rec) {
-		cmyth_dbg(CMYTH_DBG_ERROR, "%s: invalid args rec = %p\n",
-			  __FUNCTION__, rec);
-		return 0;
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return -EINVAL;
 	}
 
-	if (!rec->rec_conn) {
-		cmyth_dbg(CMYTH_DBG_ERROR, "%s: invalid args rec->rec_conn = %p\n",
-			  __FUNCTION__, rec->rec_conn);
-		return 0;
-	}
-
-	if(rec->rec_conn->conn_version < 26)
+	if (!rec->rec_livetv_chain)
 		return 1;
 
-	pthread_mutex_lock(&mutex);
-	dir = rec->rec_livetv_chain->chain_ct
-			- rec->rec_livetv_chain->chain_current - 1;
-	if(dir != 0) {
-		cmyth_livetv_chain_switch(rec, dir);
-	}
-	else {
-		rec->rec_livetv_chain->chain_switch_on_create=1;
-	}
-	pthread_mutex_unlock(&mutex);
-	return 1;
+	dir = rec->rec_livetv_chain->chain_ct - rec->rec_livetv_chain->chain_current - 1;
+
+	return cmyth_livetv_chain_switch(rec, dir);
 }
 
 /*
- * cmyth_livetv_chain_request_block(cmyth_recorder_t file, unsigned long len)
- * 
- * Scope: PUBLIC
+ * cmyth_livetv_chain_request_block()
+ *
+ * Scope: PRIVATE
  *
  * Description
  *
@@ -932,21 +766,14 @@ cmyth_livetv_chain_switch_last(cmyth_recorder_t rec)
  *
  * Failure: an int containing -errno
  */
-static int
-cmyth_livetv_chain_request_block(cmyth_recorder_t rec, unsigned long len)
+static int32_t
+cmyth_livetv_chain_request_block(cmyth_recorder_t rec, int32_t len)
 {
-	int ret, retry;
+	int32_t ret;
+	int retry;
 
 	cmyth_dbg(CMYTH_DBG_DEBUG, "%s [%s:%d]: (trace) {\n", __FUNCTION__,
 				__FILE__, __LINE__);
-
-	if (!rec) {
-		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no connection\n",
-			  __FUNCTION__);
-		return -EINVAL;
-	}
-
-	pthread_mutex_lock(&mutex);
 
 	do {
 		retry = 0;
@@ -956,9 +783,7 @@ cmyth_livetv_chain_request_block(cmyth_recorder_t rec, unsigned long len)
 			retry = cmyth_livetv_chain_switch(rec, 1);
 		}
 	}
-	while (retry);
-
-	pthread_mutex_unlock(&mutex);
+	while (retry > 0);
 
 	cmyth_dbg(CMYTH_DBG_DEBUG, "%s [%s:%d]: (trace) }\n",
 				__FUNCTION__, __FILE__, __LINE__);
@@ -966,24 +791,43 @@ cmyth_livetv_chain_request_block(cmyth_recorder_t rec, unsigned long len)
 	return ret;
 }
 
-int cmyth_livetv_chain_read(cmyth_recorder_t rec, char *buf, unsigned long len)
+/*
+ * cmyth_livetv_chain_read()
+ *
+ * Scope: PRIVATE
+ *
+ * Description
+ *
+ * Request and read a block of data from backend
+ *
+ * Return Value:
+ *
+ * Sucess: number of bytes transfered
+ *
+ * Failure: an int containing -errno
+ */
+static int32_t
+cmyth_livetv_chain_read(cmyth_recorder_t rec, char *buf, int32_t len)
 {
 	int ret, retry;
-	unsigned long vlen, rlen, nlen;
+	int32_t vlen, rlen, nlen;
+	cmyth_livetv_chain_t chain;
+	cmyth_file_t file;
 
-	if (rec == NULL) {
-		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no connection\n",
-			  __FUNCTION__);
-		return -EINVAL;
-	}
+	if (!rec || !rec->rec_livetv_chain || !rec->rec_livetv_file)
+		return (int32_t) -EINVAL;
+
+	chain = ref_hold(rec->rec_livetv_chain);
+	file = ref_hold(rec->rec_livetv_file);
+	ref_hold(rec);
 
 	/*
-	 * Set the requested block size to the recommended value. It was
-	 * estimated the previous time.
+	 * Set the requested block size to the recommended value.
+	 * It was estimated the previous time.
 	 * = 0 : No limit. Use the input value (len)
 	 * > 0 : limit is capped at this value
 	 */
-	vlen = rec->rec_livetv_chain->livetv_block_len;
+	vlen = chain->livetv_block_len;
 
 	do {
 		if (vlen == 0 || vlen > len) {
@@ -994,26 +838,27 @@ int cmyth_livetv_chain_read(cmyth_recorder_t rec, char *buf, unsigned long len)
 		}
 
 		retry = 0;
-		ret = cmyth_file_read(rec->rec_livetv_file, buf, rlen);
+		ret = cmyth_file_read(file, buf, rlen);
 		if (ret < 0) {
 			break;
 		}
-		nlen = (unsigned long)ret;
+		nlen = ret;
 		if (nlen == 0) {
 			/* eof, switch to next file */
-			pthread_mutex_lock(&mutex);
 			retry = cmyth_livetv_chain_switch(rec, 1);
-			pthread_mutex_unlock(&mutex);
-
 			if (retry == 1) {
+				ref_release(file);
+				file = ref_hold(rec->rec_livetv_file);
+				/* Already requested ? seek to 0 */
+				cmyth_file_seek(file, 0, WHENCE_SET);
 				/* Chain switch done. Retry without limit */
 				vlen = 0;
 			}
-			else if (rec->rec_livetv_chain->livetv_watch == 1) {
+			else if (retry == 0 && chain->livetv_watch == 0) {
 				/*
 				 * Current buffer is empty on the last file.
 				 * We are waiting some time refilling buffer
-				 * Timeout is 0.5 seconde before release.
+				 * Timeout is 250 ms before release.
 				 */
 				cmyth_dbg(CMYTH_DBG_ERROR,
 					  "%s: wait some 250ms before request block\n",
@@ -1034,16 +879,19 @@ int cmyth_livetv_chain_read(cmyth_recorder_t rec, char *buf, unsigned long len)
 			vlen = 0;
 		}
 
-	} while(retry);
+	} while (retry > 0);
 
 	/* Store the recommended value of block size for next time */
-	rec->rec_livetv_chain->livetv_block_len = vlen;
+	chain->livetv_block_len = vlen;
 
+	ref_release(rec);
+	ref_release(file);
+	ref_release(chain);
 	return ret;
 }
 
 /*
- * cmyth_livetv_chain_duration(cmyth_recorder_t file)
+ * cmyth_livetv_chain_duration()
  *
  * Scope: PUBLIC
  *
@@ -1057,32 +905,43 @@ int cmyth_livetv_chain_read(cmyth_recorder_t rec, char *buf, unsigned long len)
  *
  * Failure: an int containing -errno
  */
-
-long long
+int64_t
 cmyth_livetv_chain_duration(cmyth_recorder_t rec)
 {
-  int cur, ct;
-  long long ret=0;
-  ct  = rec->rec_livetv_chain->chain_ct;
-  for (cur = 0; cur < ct; cur++) {
-			ret += rec->rec_livetv_chain->chain_files[cur]->file_length;
-		}
-  return ret;
+	int cur, ct;
+	int64_t ret = 0;
+	cmyth_livetv_chain_t chain;
+
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return (int64_t) -EINVAL;
+	}
+	if (!rec->rec_livetv_chain)
+		return 0;
+	chain = ref_hold(rec->rec_livetv_chain);
+
+	ct  = chain->chain_ct;
+	for (cur = 0; cur < ct; cur++) {
+		ret += chain->chain_files[cur]->file_length;
+	}
+
+	ref_release(chain);
+	return ret;
 }
 
 /*
- * cmyth_livetv_chain_seek(cmyth_recorder_t file, long long offset, int whence)
- * 
- * Scope: PUBLIC
+ * cmyth_livetv_chain_seek()
+ *
+ * Scope: PRIVATE
  *
  * Description
  *
  * Seek to a new position in the file based on the value of whence:
- *	SEEK_SET
+ *	WHENCE_SET
  *		The offset is set to offset bytes.
- *	SEEK_CUR
+ *	WHENCE_CUR
  *		The offset is set to the current position plus offset bytes.
- *	SEEK_END
+ *	WHENCE_END
  *		The offset is set to the size of the file minus offset bytes.
  *
  * Return Value:
@@ -1091,99 +950,113 @@ cmyth_livetv_chain_duration(cmyth_recorder_t rec)
  *
  * Failure: an int containing -errno
  */
-static long long
-cmyth_livetv_chain_seek(cmyth_recorder_t rec, long long offset, int whence)
+static int64_t
+cmyth_livetv_chain_seek(cmyth_recorder_t rec, int64_t offset, int8_t whence)
 {
-	long long ret;
-	cmyth_file_t fp;
+	int64_t ret;
+	cmyth_file_t file, fp;
+	cmyth_livetv_chain_t chain;
 	int cur, ct;
 
-	if (rec == NULL)
-		return -EINVAL;
-
+	ret = (int64_t) -1;
 	fp = NULL;
 	cur = -1;
-	ct  = rec->rec_livetv_chain->chain_ct;
 
-	if (whence == SEEK_END) {
+	if (!rec || !rec->rec_livetv_chain || !rec->rec_livetv_file)
+		return (int64_t) -EINVAL;
+	chain = ref_hold(rec->rec_livetv_chain);
+	file = ref_hold(rec->rec_livetv_file);
+	ref_hold(rec);
 
-		offset -= rec->rec_livetv_file->file_req;
-		for (cur = rec->rec_livetv_chain->chain_current; cur < ct; cur++) {
-			offset += rec->rec_livetv_chain->chain_files[cur]->file_length;
+	ct  = chain->chain_ct;
+
+	if (whence == WHENCE_END) {
+		offset = - file->file_req - offset;
+		for (cur = chain->chain_current; cur < ct; cur++) {
+			offset += chain->chain_files[cur]->file_length;
 		}
 
-		cur = rec->rec_livetv_chain->chain_current;
-		fp  = rec->rec_livetv_chain->chain_files[cur];
-		whence = SEEK_CUR;
+		cur = chain->chain_current;
+		fp  = chain->chain_files[cur];
+		whence = WHENCE_CUR;
 	}
 
-	if (whence == SEEK_SET) {
-
+	if (whence == WHENCE_SET) {
 		for (cur = 0; cur < ct; cur++) {
-    			fp = rec->rec_livetv_chain->chain_files[cur];
-			if (offset < (long long)fp->file_length)
+			fp = chain->chain_files[cur];
+			if (offset < fp->file_length)
 				break;
 			offset -= fp->file_length;
 		}
 	}
 
-	if (whence == SEEK_CUR) {
+	if (whence == WHENCE_CUR) {
 
-	if (offset == 0) {
-		cur     = rec->rec_livetv_chain->chain_current;
-		offset += rec->rec_livetv_chain->chain_files[cur]->file_req;
-		for (; cur > 0; cur--) {
-			offset += rec->rec_livetv_chain->chain_files[cur-1]->file_length;
+		if (offset == 0) {
+			cur     = chain->chain_current;
+			offset += chain->chain_files[cur]->file_req;
+			for (; cur > 0; cur--) {
+				offset += chain->chain_files[cur-1]->file_length;
+			}
+			ret = offset;
+			goto out;
+		} else {
+			cur = chain->chain_current;
+			fp  = chain->chain_files[cur];
 		}
-		return offset;
-	} else {
-		cur = rec->rec_livetv_chain->chain_current;
-		fp  = rec->rec_livetv_chain->chain_files[cur];
+
+		offset += fp->file_req;
+
+		while (offset > fp->file_length) {
+			cur++;
+			offset -= fp->file_length;
+			if (cur == ct) {
+				ret = -1;
+				goto out;
+			}
+			fp = chain->chain_files[cur];
+		}
+
+		while (offset < 0) {
+			cur--;
+			if (cur < 0) {
+				ret = -1;
+				goto out;
+			}
+			fp = chain->chain_files[cur];
+			offset += fp->file_length;
+		}
+
+		whence = WHENCE_SET;
 	}
 
-	offset += fp->file_req;
-
-	while (offset > (long long)fp->file_length) {
-		cur++;
-		offset -= fp->file_length;
-		if(cur == ct)
-			return -1;
-		fp = rec->rec_livetv_chain->chain_files[cur];
-	}
-
-	while (offset < 0) {
-		cur--;
-		if(cur < 0)
-			return -1;
-		fp = rec->rec_livetv_chain->chain_files[cur];
-		offset += fp->file_length;
-	}
-
-	offset -= fp->file_req;
-  }
-
-	if (fp && cur >=0)
+	if (cur >= 0 && cur < chain->chain_ct && fp)
 	{
-		pthread_mutex_lock(&mutex);
-		
-		ret = cmyth_file_seek_unlocked(fp, offset, whence);
-
-		if (ret >= 0 ) {
-			cur -= rec->rec_livetv_chain->chain_current;
-			cmyth_livetv_chain_switch(rec, cur);	
+		if ((ret = cmyth_file_seek(fp, offset, whence)) >= 0) {
+			cur -= chain->chain_current;
+			if (cmyth_livetv_chain_switch(rec, cur) == 1) {
+				/*
+				 * Return the new position in the chain
+				 */
+				for (cur = 0; cur < chain->chain_current; cur++) {
+					fp = chain->chain_files[cur];
+					ret += fp->file_length;
+				}
+			}
 		}
-		
-		pthread_mutex_unlock(&mutex);
 	}
-	else
-		return -1;
 
+	out:
+
+	ref_release(rec);
+	ref_release(chain);
+	ref_release(file);
 	return ret;
 }
 
 /*
- * cmyth_livetv_read(cmyth_recorder_t rec, char *buf, unsigned long len)
- * 
+ * cmyth_livetv_read()
+ *
  * Scope: PUBLIC
  *
  * Description
@@ -1196,28 +1069,37 @@ cmyth_livetv_chain_seek(cmyth_recorder_t rec, long long offset, int whence)
  *
  * Failure: an int containing -errno
  */
-int cmyth_livetv_read(cmyth_recorder_t rec, char *buf, unsigned long len)
+int32_t
+cmyth_livetv_read(cmyth_recorder_t rec, char *buf, int32_t len)
 {
-	if(rec->rec_conn->conn_version >= 26)
-		return cmyth_livetv_chain_read(rec, buf, len);
+	int32_t rtrn;
+
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return (int32_t) -EINVAL;
+	}
+
+	if (rec->rec_conn->conn_version >= 26)
+		rtrn = cmyth_livetv_chain_read(rec, buf, len);
 	else
-		return cmyth_ringbuf_read(rec, buf, len);
-	
+		rtrn = cmyth_ringbuf_read(rec, buf, len);
+
+	return rtrn;
 }
 
 /*
- * cmyth_livetv_seek(cmyth_recorder_t file, long long offset, int whence)
- * 
+ * cmyth_livetv_seek()
+ *
  * Scope: PUBLIC
  *
  * Description
  *
  * Seek to a new position in the file based on the value of whence:
- *	SEEK_SET
+ *	WHENCE_SET
  *		The offset is set to offset bytes.
- *	SEEK_CUR
+ *	WHENCE_CUR
  *		The offset is set to the current position plus offset bytes.
- *	SEEK_END
+ *	WHENCE_END
  *		The offset is set to the size of the file minus offset bytes.
  * This function will select the appropriate call based on the protocol.
  *
@@ -1227,12 +1109,17 @@ int cmyth_livetv_read(cmyth_recorder_t rec, char *buf, unsigned long len)
  *
  * Failure: an int containing -errno
  */
-long long
-cmyth_livetv_seek(cmyth_recorder_t rec, long long offset, int whence)
+int64_t
+cmyth_livetv_seek(cmyth_recorder_t rec, int64_t offset, int8_t whence)
 {
-	long long rtrn;
+	int64_t rtrn;
 
-	if(rec->rec_conn->conn_version >= 26)
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return (int64_t) -EINVAL;
+	}
+
+	if (rec->rec_conn->conn_version >= 26)
 		rtrn = cmyth_livetv_chain_seek(rec, offset, whence);
 	else
 		rtrn = cmyth_ringbuf_seek(rec, offset, whence);
@@ -1241,8 +1128,8 @@ cmyth_livetv_seek(cmyth_recorder_t rec, long long offset, int whence)
 }
 
 /*
- * cmyth_livetv_request_block(cmyth_recorder_t file, unsigned long len)
- * 
+ * cmyth_livetv_request_block()
+ *
  * Scope: PUBLIC
  *
  * Description
@@ -1257,15 +1144,20 @@ cmyth_livetv_seek(cmyth_recorder_t rec, long long offset, int whence)
  *
  * Failure: an int containing -errno
  */
-int
-cmyth_livetv_request_block(cmyth_recorder_t rec, unsigned long size)
+int32_t
+cmyth_livetv_request_block(cmyth_recorder_t rec, int32_t len)
 {
-	unsigned long rtrn;
+	int32_t rtrn;
 
-	if(rec->rec_conn->conn_version >= 26)
-		rtrn = cmyth_livetv_chain_request_block(rec, size);
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return (int32_t) -EINVAL;
+	}
+
+	if (rec->rec_conn->conn_version >= 26)
+		rtrn = cmyth_livetv_chain_request_block(rec, len);
 	else
-		rtrn = cmyth_ringbuf_request_block(rec, size);
+		rtrn = cmyth_ringbuf_request_block(rec, len);
 
 	return rtrn;
 }
@@ -1274,8 +1166,13 @@ int
 cmyth_livetv_select(cmyth_recorder_t rec, struct timeval *timeout)
 {
 	int rtrn;
-	
-	if(rec->rec_conn->conn_version >= 26)
+
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return -EINVAL;
+	}
+
+	if (rec->rec_conn->conn_version >= 26)
 		rtrn = cmyth_livetv_chain_select(rec, timeout);
 	else
 		rtrn = cmyth_ringbuf_select(rec, timeout);
@@ -1284,21 +1181,31 @@ cmyth_livetv_select(cmyth_recorder_t rec, struct timeval *timeout)
 }
 
 /*
- * cmyth_livetv_get_block(cmyth_recorder_t rec, char *buf, unsigned long len)
+ * cmyth_livetv_get_block()
+ *
  * Scope: PUBLIC
+ *
  * Description
+ *
  * Read incoming file data off the network into a buffer of length len.
  *
  * Return Value:
+ *
  * Sucess: number of bytes read into buf
- * Failure: -1
+ *
+ * Failure: an int containing -errno
  */
-int
-cmyth_livetv_get_block(cmyth_recorder_t rec, char *buf, unsigned long len)
+int32_t
+cmyth_livetv_get_block(cmyth_recorder_t rec, char *buf, int32_t len)
 {
 	int rtrn;
 
-	if(rec->rec_conn->conn_version >= 26)
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return (int32_t) -EINVAL;
+	}
+
+	if (rec->rec_conn->conn_version >= 26)
 		rtrn = cmyth_livetv_chain_get_block(rec, buf, len);
 	else
 		rtrn = cmyth_ringbuf_get_block(rec, buf, len);
@@ -1307,27 +1214,31 @@ cmyth_livetv_get_block(cmyth_recorder_t rec, char *buf, unsigned long len)
 }
 
 cmyth_recorder_t
-cmyth_spawn_live_tv(cmyth_recorder_t rec, unsigned buflen, int tcp_rcvbuf,
-										void (*prog_update_callback)(cmyth_proginfo_t),
-										char ** err, char* channame)
+cmyth_spawn_live_tv(cmyth_recorder_t rec, uint32_t buflen, int32_t tcp_rcvbuf,
+	void (*prog_update_callback)(cmyth_proginfo_t),
+	char ** err, char* channame)
 {
 	cmyth_recorder_t rtrn = NULL;
 	int i;
 
-	if(rec->rec_conn->conn_version >= 26) {
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return NULL;
+	}
+
+	if (rec->rec_conn->conn_version >= 26) {
 		if (cmyth_recorder_spawn_chain_livetv(rec, channame) != 0) {
 			*err = "Spawn livetv failed.";
 			goto err;
 		}
-
-		for(i=0; i<20; i++) {
-			if(cmyth_recorder_is_recording(rec) != 1)
+		for (i = 0; i < 20; i++) {
+			if (cmyth_recorder_is_recording(rec) != 1)
 				sleep(1);
 			else
 				break;
 		}
 
-		if ((rtrn = cmyth_livetv_chain_setup(rec, tcp_rcvbuf,
+		if ((rtrn = cmyth_livetv_chain_setup(rec, buflen, tcp_rcvbuf,
 							prog_update_callback)) == NULL) {
 			*err = "Failed to setup livetv.";
 			goto err;
@@ -1350,7 +1261,7 @@ cmyth_spawn_live_tv(cmyth_recorder_t rec, unsigned buflen, int tcp_rcvbuf,
 		}
 	}
 
-	if(rtrn->rec_conn->conn_version < 34 && channame) {
+	if (rtrn->rec_conn->conn_version < 34 && channame) {
 		if (cmyth_recorder_pause(rtrn) != 0) {
 			*err = "Failed to pause recorder to change channel";
 			goto err;
@@ -1365,4 +1276,75 @@ cmyth_spawn_live_tv(cmyth_recorder_t rec, unsigned buflen, int tcp_rcvbuf,
 	err:
 
 	return rtrn;
+}
+
+int32_t
+cmyth_livetv_chain_last(cmyth_recorder_t rec)
+{
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n",
+			  __FUNCTION__);
+		return (int32_t) -EINVAL;
+	}
+	if (!rec->rec_livetv_chain) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no chain\n",
+			  __FUNCTION__);
+		return (int32_t) -EINVAL;
+	}
+
+	return rec->rec_livetv_chain->chain_ct - 1;
+}
+
+cmyth_proginfo_t
+cmyth_livetv_chain_prog(cmyth_recorder_t rec, int32_t index)
+{
+	cmyth_proginfo_t prog;
+	cmyth_livetv_chain_t chain;
+
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n",
+			  __FUNCTION__);
+		return NULL;
+	}
+	if (!rec->rec_livetv_chain) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no chain\n",
+			  __FUNCTION__);
+		return NULL;
+	}
+	chain = ref_hold(rec->rec_livetv_chain);
+	if (index >= 0 && index < chain->chain_ct) {
+		prog = ref_hold(chain->progs[index]);
+	}
+	else
+		prog = NULL;
+
+	ref_release(chain);
+	return prog;
+}
+
+cmyth_file_t
+cmyth_livetv_chain_file(cmyth_recorder_t rec, int32_t index)
+{
+	cmyth_file_t file;
+	cmyth_livetv_chain_t chain;
+
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n",
+			  __FUNCTION__);
+		return NULL;
+	}
+	if (!rec->rec_livetv_chain) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no chain\n",
+			  __FUNCTION__);
+		return NULL;
+	}
+	chain = ref_hold(rec->rec_livetv_chain);
+	if (index >= 0 && index < chain->chain_ct) {
+		file = ref_hold(chain->chain_files[index]);
+	}
+	else
+		file = NULL;
+
+	ref_release(chain);
+	return file;
 }

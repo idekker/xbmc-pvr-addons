@@ -1,8 +1,5 @@
 /*
- *      vdr-plugin-vnsi - XBMC server plugin for VDR
- *
- *      Copyright (C) 2010 Alwin Esch (Team XBMC)
- *
+ *      Copyright (C) 2005-2012 Team XBMC
  *      http://www.xbmc.org
  *
  *  This Program is free software; you can redistribute it and/or modify
@@ -16,348 +13,640 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with XBMC; see the file COPYING.  If not, write to
- *  the Free Software Foundation, 675 Mass Ave, Cambridge, MA 02139, USA.
- *  http://www.gnu.org/copyleft/gpl.html
+ *  along with XBMC; see the file COPYING.  If not, see
+ *  <http://www.gnu.org/licenses/>.
  *
  */
 
-#include <stdlib.h>
-#include <assert.h>
-#include <vdr/remux.h>
-#include <vdr/channels.h>
+
 #include "config.h"
-#include "receiver.h"
 #include "demuxer.h"
-#include "demuxer_AAC.h"
-#include "demuxer_AC3.h"
-#include "demuxer_DTS.h"
-#include "demuxer_h264.h"
-#include "demuxer_MPEGAudio.h"
-#include "demuxer_MPEGVideo.h"
-#include "demuxer_Subtitle.h"
-#include "demuxer_Teletext.h"
+#include "parser.h"
+#include "videobuffer.h"
 
-#define PTS_MASK 0x1ffffffffLL
-//#define PTS_MASK 0x7ffffLL
+#include <vdr/channels.h>
+#include <libsi/si.h>
 
-#ifndef INT64_MIN
-#define INT64_MIN       (-0x7fffffffffffffffLL-1)
-#endif
-
-int64_t PesGetPTS(const uint8_t *buf, int len)
+cVNSIDemuxer::cVNSIDemuxer()
 {
-  /* assume mpeg2 pes header ... */
-  if (PesIsVideoPacket(buf) || PesIsAudioPacket(buf)) {
-
-    if ((buf[6] & 0xC0) != 0x80)
-      return DVD_NOPTS_VALUE;
-    if ((buf[6] & 0x30) != 0)
-      return DVD_NOPTS_VALUE;
-
-    if ((len > 13) && (buf[7] & 0x80)) { /* pts avail */
-      int64_t pts;
-      pts  = ((int64_t)(buf[ 9] & 0x0E)) << 29 ;
-      pts |= ((int64_t) buf[10])         << 22 ;
-      pts |= ((int64_t)(buf[11] & 0xFE)) << 14 ;
-      pts |= ((int64_t) buf[12])         <<  7 ;
-      pts |= ((int64_t)(buf[13] & 0xFE)) >>  1 ;
-      return pts;
-    }
-  }
-  return DVD_NOPTS_VALUE;
+  m_OldPmtVersion = -1;
 }
 
-int64_t PesGetDTS(const uint8_t *buf, int len)
+cVNSIDemuxer::~cVNSIDemuxer()
 {
-  if (PesIsVideoPacket(buf) || PesIsAudioPacket(buf))
-  {
-    if ((buf[6] & 0xC0) != 0x80)
-      return DVD_NOPTS_VALUE;
-    if ((buf[6] & 0x30) != 0)
-      return DVD_NOPTS_VALUE;
 
-    if (len > 18 && (buf[7] & 0x40)) { /* dts avail */
-      int64_t dts;
-      dts  = ((int64_t)( buf[14] & 0x0E)) << 29 ;
-      dts |=  (int64_t)( buf[15]         << 22 );
-      dts |=  (int64_t)((buf[16] & 0xFE) << 14 );
-      dts |=  (int64_t)( buf[17]         <<  7 );
-      dts |=  (int64_t)((buf[18] & 0xFE) >>  1 );
-      return dts;
-    }
-  }
-  return DVD_NOPTS_VALUE;
 }
 
-// --- cParser -------------------------------------------------
-
-cParser::cParser(cLiveStreamer *streamer, int pID)
- : m_Streamer(streamer)
- , m_pID(pID)
- , m_FoundFrame(false)
+void cVNSIDemuxer::Open(const cChannel &channel, cVideoBuffer *videoBuffer)
 {
-  m_curPTS    = DVD_NOPTS_VALUE;
-  m_curDTS    = DVD_NOPTS_VALUE;
-  m_LastDTS   = DVD_NOPTS_VALUE;
-  m_epochDTS  = 0;
-  m_badDTS    = 0;
-}
+  cMutexLock lock(&m_Mutex);
 
-int64_t cParser::Rescale(int64_t a)
-{
-  uint64_t b = DVD_TIME_BASE;
-  uint64_t c = 90000;
-  uint64_t r = c/2;
+  m_CurrentChannel = channel;
+  m_VideoBuffer = videoBuffer;
+  m_OldPmtVersion = -1;
 
-  if (b<=INT_MAX && c<=INT_MAX){
-    if (a<=INT_MAX)
-      return (a * b + r)/c;
-    else
-      return a/c*b + (a%c*b + r)/c;
-  }
+  if (m_CurrentChannel.Vpid())
+    m_WaitIFrame = true;
   else
+    m_WaitIFrame = false;
+
+  m_FirstFramePTS = 0;
+
+  m_PtsWrap.m_Wrap = false;
+  m_PtsWrap.m_NoOfWraps = 0;
+  m_PtsWrap.m_ConfirmCount = 0;
+  m_MuxPacketSerial = 0;
+  m_Error = ERROR_DEMUX_NODATA;
+  m_SetRefTime = true;
+}
+
+void cVNSIDemuxer::Close()
+{
+  cMutexLock lock(&m_Mutex);
+
+  for (std::list<cTSStream*>::iterator it = m_Streams.begin(); it != m_Streams.end(); ++it)
   {
-    uint64_t a0= a&0xFFFFFFFF;
-    uint64_t a1= a>>32;
-    uint64_t b0= b&0xFFFFFFFF;
-    uint64_t b1= b>>32;
-    uint64_t t1= a0*b1 + a1*b0;
-    uint64_t t1a= t1<<32;
+    DEBUGLOG("Deleting stream parser for pid=%i and type=%i", (*it)->GetPID(), (*it)->Type());
+    delete (*it);
+  }
+  m_Streams.clear();
+  m_StreamInfos.clear();
+}
 
-    a0 = a0*b0 + t1a;
-    a1 = a1*b1 + (t1>>32) + (a0<t1a);
-    a0 += r;
-    a1 += a0<r;
+int cVNSIDemuxer::Read(sStreamPacket *packet)
+{
+  uint8_t *buf;
+  int len;
+  cTSStream *stream;
 
-    for (int i=63; i>=0; i--)
+  cMutexLock lock(&m_Mutex);
+
+  // clear packet
+  if (!packet)
+    return -1;
+  packet->data = NULL;
+  packet->streamChange = false;
+  packet->pmtChange = false;
+
+  // read TS Packet from buffer
+  len = m_VideoBuffer->Read(&buf, TS_SIZE, m_endTime, m_wrapTime);
+  // eof
+  if (len == -2)
+    return -2;
+  else if (len != TS_SIZE)
+    return -1;
+
+  m_Error &= ~ERROR_DEMUX_NODATA;
+
+  int ts_pid = TsPid(buf);
+
+  // parse PAT/PMT
+  if (ts_pid == PATPID)
+  {
+    m_PatPmtParser.ParsePat(buf, TS_SIZE);
+  }
+#if APIVERSNUM >= 10733
+  else if (m_PatPmtParser.IsPmtPid(ts_pid))
+#else
+  else if (ts_pid == m_PatPmtParser.PmtPid())
+#endif
+  {
+    int patVersion, pmtVersion;
+    m_PatPmtParser.ParsePmt(buf, TS_SIZE);
+    if (m_PatPmtParser.GetVersions(patVersion, pmtVersion))
     {
-      a1+= a1 + ((a0>>i)&1);
-      t1+=t1;
-      if (c <= a1)
+      if (pmtVersion != m_OldPmtVersion)
       {
-        a1 -= c;
-        t1++;
+        cChannel pmtChannel(m_CurrentChannel);
+        SetChannelPids(&pmtChannel, &m_PatPmtParser);
+        SetChannelStreams(&pmtChannel);
+        m_PatPmtParser.Reset();
+        m_OldPmtVersion = pmtVersion;
+        if (EnsureParsers())
+        {
+          packet->pmtChange = true;
+            return 1;
+        }
       }
     }
-    return t1;
   }
-}
+  else if (stream = FindStream(ts_pid))
+  {
+    int error = stream->ProcessTSPacket(buf, packet, m_WaitIFrame);
+    if (error == 0)
+    {
+      if (m_WaitIFrame)
+      {
+        if (packet->pts != DVD_NOPTS_VALUE)
+          m_FirstFramePTS = packet->pts;
+        m_WaitIFrame = false;
+      }
 
-/*
- * Extract DTS and PTS and update current values in stream
- */
-int cParser::ParsePESHeader(uint8_t *buf, size_t len)
-{
-  /* parse PES header */
-  unsigned int hdr_len = PesHeaderLength(buf);
+      if (packet->pts < m_FirstFramePTS)
+        return 0;
 
-  /* parse PTS */
-  int64_t pts = PesGetPTS(buf, len);
-  int64_t dts = PesGetDTS(buf, len);
-  if (dts == DVD_NOPTS_VALUE)
-    dts = pts;
-  
-  dts = dts & PTS_MASK;
-  pts = pts & PTS_MASK;
-  
-  if(pts != 0) m_curDTS = dts;
-  if(dts != 0) m_curPTS = pts;
-  
-  return hdr_len;
-}
-
-void cParser::BufferPacket(sStreamPacket *pkt)
-{
-  // create new packet
-  sStreamPacket* p = new sStreamPacket(*pkt);
-
-  // copy payload
-  p->data = (uint8_t*)malloc(pkt->size);
-  memcpy(p->data, pkt->data, pkt->size);
-
-  // push to queue
-  m_queue.push(p);
-}
-
-void cParser::SendPacket(sStreamPacket *pkt)
-{
-  if(pkt->dts == DVD_NOPTS_VALUE) return;
-  if(pkt->pts == DVD_NOPTS_VALUE) return;
-
-  int64_t dts = pkt->dts;
-  int64_t pts = pkt->pts;
-
-  // Rescale for XBMC
-  pkt->dts      = Rescale(dts);
-  pkt->pts      = Rescale(pts);
-  pkt->duration = Rescale(pkt->duration);
-
-  // buffer packets if we are not ready to send
-  if (m_Streamer->IsStarting()) {
-    BufferPacket(pkt);
-    return;
-  }
-
-  // stream packet if queue is empty
-  if(m_queue.size() == 0) {
-    m_Streamer->sendStreamPacket(pkt);
-    return;
-  }
-
-  BufferPacket(pkt);
-
-  // send buffered data first
-  INFOLOG("sending %i buffered packets", (int)m_queue.size());
-
-  while(m_queue.size() > 0) {
-    sStreamPacket* p = m_queue.front();
-    if(p != NULL) {
-      m_Streamer->sendStreamPacket(p);
-      free(p->data);
-      delete p;
+      packet->serial = m_MuxPacketSerial;
+      if (m_SetRefTime)
+      {
+        m_refTime = m_VideoBuffer->GetRefTime();
+        packet->reftime = m_refTime;
+        m_SetRefTime = false;
+      }
+      return 1;
     }
-    m_queue.pop();
+    else if (error < 0)
+    {
+      m_Error |= abs(error);
+    }
   }
+
+  return 0;
 }
 
-
-// --- cTSDemuxer ----------------------------------------------------
-
-cTSDemuxer::cTSDemuxer(cLiveStreamer *streamer, eStreamType type, int pid)
-  : m_Streamer(streamer)
-  , m_streamType(type)
-  , m_pID(pid)
+bool cVNSIDemuxer::SeekTime(int64_t time)
 {
-  m_pesError        = false;
-  m_pesParser       = NULL;
-  m_language[0]     = 0;
-  m_FpsScale        = 0;
-  m_FpsRate         = 0;
-  m_Height          = 0;
-  m_Width           = 0;
-  m_Aspect          = 0.0f;
-  m_Channels        = 0;
-  m_SampleRate      = 0;
-  m_BitRate         = 0;
-  m_BitsPerSample   = 0;
-  m_BlockAlign      = 0;
+  off_t pos, pos_min, pos_max, pos_limit, start_pos;
+  int64_t ts, ts_min, ts_max, last_ts;
+  int no_change;
 
-  if (m_streamType == stMPEG2VIDEO)
-    m_pesParser = new cParserMPEG2Video(this, m_Streamer, m_pID);
-  else if (m_streamType == stH264)
-    m_pesParser = new cParserH264(this, m_Streamer, m_pID);
-  else if (m_streamType == stMPEG2AUDIO)
-    m_pesParser = new cParserMPEG2Audio(this, m_Streamer, m_pID);
-  else if (m_streamType == stAACADST)
-    m_pesParser = new cParserAAC(this, m_Streamer, m_pID);
-  else if (m_streamType == stAACLATM)
-    m_pesParser = new cParserAAC(this, m_Streamer, m_pID);
-  else if (m_streamType == stAC3)
-    m_pesParser = new cParserAC3(this, m_Streamer, m_pID);
-  else if (m_streamType == stDTS)
-    m_pesParser = new cParserDTS(this, m_Streamer, m_pID);
-  else if (m_streamType == stEAC3)
-    m_pesParser = new cParserAC3(this, m_Streamer, m_pID);
-  else if (m_streamType == stTELETEXT)
-    m_pesParser = new cParserTeletext(this, m_Streamer, m_pID);
-  else if (m_streamType == stDVBSUB)
-    m_pesParser = new cParserSubtitle(this, m_Streamer, m_pID);
-  else
-  {
-    ERRORLOG("Unrecognised type %i inside stream %i", m_streamType, m_pID);
-    return;
-  }
-}
-
-cTSDemuxer::~cTSDemuxer()
-{
-  if (m_pesParser)
-  {
-    delete m_pesParser;
-    m_pesParser = NULL;
-  }
-}
-
-bool cTSDemuxer::ProcessTSPacket(unsigned char *data)
-{
-  if (!data)
+  if (!m_VideoBuffer->HasBuffer())
     return false;
 
-  bool pusi  = TsPayloadStart(data);
-  int  bytes = TS_SIZE - TsPayloadOffset(data);
+  cMutexLock lock(&m_Mutex);
 
-  if(bytes < 0 || bytes > TS_SIZE)
-    return false;
+//  INFOLOG("----- seek to time: %ld", time);
 
-  if (TsError(data))
+  // rescale to 90khz
+  time = cTSStream::Rescale(time, 90000, DVD_TIME_BASE);
+
+  m_VideoBuffer->GetPositions(&pos, &pos_min, &pos_max);
+
+//  INFOLOG("----- seek to time: %ld", time);
+//  INFOLOG("------pos: %ld, pos min: %ld, pos max: %ld", pos, pos_min, pos_max);
+
+  if (!GetTimeAtPos(&pos_min, &ts_min))
   {
-    ERRORLOG("transport error");
+    ResetParsers();
+    m_WaitIFrame = true;
     return false;
   }
 
-  if (!TsHasPayload(data))
+//  INFOLOG("----time at min: %ld", ts_min);
+
+  if (ts_min >= time)
   {
-    DEBUGLOG("no payload, size %d", bytes);
+    m_VideoBuffer->SetPos(pos_min);
+    ResetParsers();
+    m_WaitIFrame = true;
+    m_MuxPacketSerial++;
     return true;
   }
 
-  /* drop broken PES packets */
-  if (m_pesError && !pusi)
+  int64_t timecur;
+  GetTimeAtPos(&pos, &timecur);
+
+  // get time at end of buffer
+  unsigned int step= 1024;
+  bool gotTime;
+  do
   {
+    pos_max -= step;
+    gotTime = GetTimeAtPos(&pos_max, &ts_max);
+    step += step;
+  } while (!gotTime && pos_max >= step);
+
+  if (!gotTime)
+  {
+    ResetParsers();
+    m_WaitIFrame = true;
     return false;
   }
 
-  /* strip ts header */
-  data += TS_SIZE - bytes;
-
-  /* handle new payload unit */
-  if (pusi)
+  if (ts_max <= time)
   {
-    if (!PesIsHeader(data))
-    {
-      m_pesError = true;
-      return false;
-    }
-    m_pesError = false;
+    ResetParsers();
+    m_WaitIFrame = true;
+    m_MuxPacketSerial++;
+    return true;
   }
 
-  /* Parse the data */
-  if (m_pesParser)
-    m_pesParser->Parse(data, bytes, pusi);
+//  INFOLOG(" - time in buffer: %ld", cTSStream::Rescale(ts_max-ts_min, DVD_TIME_BASE, 90000)/1000000);
 
+  // bisect seek
+  if(ts_min > ts_max)
+  {
+    ResetParsers();
+    m_WaitIFrame = true;
+    return false;
+  }
+  else if (ts_min == ts_max)
+  {
+    pos_limit = pos_min;
+  }
+  else
+    pos_limit = pos_max;
+
+  no_change = 0;
+  ts = time;
+  last_ts = 0;
+  while (pos_min < pos_limit)
+  {
+    if (no_change==0)
+    {
+      // interpolate position
+      pos = cTSStream::Rescale(time - ts_min, pos_max - pos_min, ts_max - ts_min)
+          + pos_min - (pos_max - pos_limit);
+    }
+    else if (no_change==1)
+    {
+      // bisection, if interpolation failed to change min or max pos last time
+      pos = (pos_min + pos_limit) >> 1;
+    }
+    else
+    {
+      // linear search if bisection failed
+      pos = pos_min;
+    }
+
+    // clamp calculated pos into boundaries
+    if( pos <= pos_min)
+      pos = pos_min + 1;
+    else if (pos > pos_limit)
+      pos = pos_limit;
+    start_pos = pos;
+
+    // get time stamp at pos
+    if (!GetTimeAtPos(&pos, &ts))
+    {
+      ResetParsers();
+      m_WaitIFrame = true;
+      return false;
+    }
+    pos = m_VideoBuffer->GetPosCur();
+
+    // determine method for next calculation of pos
+    if ((last_ts == ts) || (pos >= pos_max))
+      no_change++;
+    else
+      no_change=0;
+
+//    INFOLOG("--- pos: %ld, \t time: %ld, diff time: %ld", pos, ts, time-ts);
+
+    // 0.4 sec is close enough
+    if (abs(time - ts) <= 36000)
+    {
+      break;
+    }
+    // target is to the left
+    else if (time <= ts)
+    {
+      pos_limit = start_pos - 1;
+      pos_max = pos;
+      ts_max = ts;
+    }
+    // target is to the right
+    if (time >= ts)
+    {
+      pos_min = pos;
+      ts_min = ts;
+    }
+    last_ts = ts;
+  }
+
+//  INFOLOG("----pos found: %ld", pos);
+//  INFOLOG("----time at pos: %ld, diff time: %ld", ts, cTSStream::Rescale(timecur-ts, DVD_TIME_BASE, 90000));
+
+  m_VideoBuffer->SetPos(pos);
+
+  ResetParsers();
+  m_WaitIFrame = true;
+  m_MuxPacketSerial++;
   return true;
 }
 
-void cTSDemuxer::SetLanguage(const char *language)
+void cVNSIDemuxer::BufferStatus(bool &timeshift, uint32_t &start, uint32_t &end)
 {
-  m_language[0] = language[0];
-  m_language[1] = language[1];
-  m_language[2] = language[2];
-  m_language[3] = 0;
+  timeshift = m_VideoBuffer->HasBuffer();
+
+  if (timeshift)
+  {
+    if (!m_wrapTime)
+    {
+      start = m_refTime;
+    }
+    else
+    {
+      start = m_endTime - (m_wrapTime - m_refTime);
+    }
+    end = m_endTime;
+  }
+  else
+  {
+    start = 0;
+    end = 0;
+  }
 }
 
-void cTSDemuxer::SetVideoInformation(int FpsScale, int FpsRate, int Height, int Width, float Aspect)
+cTSStream *cVNSIDemuxer::GetFirstStream()
 {
-  m_FpsScale        = FpsScale;
-  m_FpsRate         = FpsRate;
-  m_Height          = Height;
-  m_Width           = Width;
-  m_Aspect          = Aspect;
+  m_StreamsIterator = m_Streams.begin();
+  if (m_StreamsIterator != m_Streams.end())
+    return *m_StreamsIterator;
+  else
+    return NULL;
 }
 
-void cTSDemuxer::SetAudioInformation(int Channels, int SampleRate, int BitRate, int BitsPerSample, int BlockAlign)
+cTSStream *cVNSIDemuxer::GetNextStream()
 {
-  m_Channels        = Channels;
-  m_SampleRate      = SampleRate;
-  m_BlockAlign      = BlockAlign;
-  m_BitRate         = BitRate;
-  m_BitsPerSample   = BitsPerSample;
+  ++m_StreamsIterator;
+  if (m_StreamsIterator != m_Streams.end())
+    return *m_StreamsIterator;
+  else
+    return NULL;
 }
 
-void cTSDemuxer::SetSubtitlingDescriptor(unsigned char SubtitlingType, uint16_t CompositionPageId, uint16_t AncillaryPageId)
+cTSStream *cVNSIDemuxer::FindStream(int Pid)
 {
-  m_subtitlingType    = SubtitlingType;
-  m_compositionPageId = CompositionPageId;
-  m_ancillaryPageId   = AncillaryPageId;
+  for (std::list<cTSStream*>::iterator it = m_Streams.begin(); it != m_Streams.end(); ++it)
+  {
+    if (Pid == (*it)->GetPID())
+      return *it;
+  }
+  return NULL;
 }
+
+void cVNSIDemuxer::ResetParsers()
+{
+  for (std::list<cTSStream*>::iterator it = m_Streams.begin(); it != m_Streams.end(); ++it)
+  {
+    (*it)->ResetParser();
+  }
+}
+
+void cVNSIDemuxer::AddStreamInfo(sStreamInfo &stream)
+{
+  m_StreamInfos.push_back(stream);
+}
+
+bool cVNSIDemuxer::EnsureParsers()
+{
+  bool streamChange = false;
+
+  std::list<cTSStream*>::iterator it = m_Streams.begin();
+  while (it != m_Streams.end())
+  {
+    std::list<sStreamInfo>::iterator its;
+    for (its = m_StreamInfos.begin(); its != m_StreamInfos.end(); ++its)
+    {
+      if ((its->pID == (*it)->GetPID()) && (its->type == (*it)->Type()))
+      {
+        break;
+      }
+    }
+    if (its == m_StreamInfos.end())
+    {
+      INFOLOG("Deleting stream for pid=%i and type=%i", (*it)->GetPID(), (*it)->Type());
+      m_Streams.erase(it);
+      it = m_Streams.begin();
+      streamChange = true;
+    }
+    else
+      ++it;
+  }
+
+  for (std::list<sStreamInfo>::iterator it = m_StreamInfos.begin(); it != m_StreamInfos.end(); ++it)
+  {
+    cTSStream *stream = FindStream(it->pID);
+    if (stream)
+    {
+      // TODO: check for change in lang
+      stream->SetLanguage(it->language);
+      continue;
+    }
+
+    if (it->type == stH264)
+    {
+      stream = new cTSStream(stH264, it->pID, &m_PtsWrap);
+    }
+    else if (it->type == stMPEG2VIDEO)
+    {
+      stream = new cTSStream(stMPEG2VIDEO, it->pID, &m_PtsWrap);
+    }
+    else if (it->type == stMPEG2AUDIO)
+    {
+      stream = new cTSStream(stMPEG2AUDIO, it->pID, &m_PtsWrap);
+      stream->SetLanguage(it->language);
+    }
+    else if (it->type == stAACADTS)
+    {
+      stream = new cTSStream(stAACADTS, it->pID, &m_PtsWrap);
+      stream->SetLanguage(it->language);
+    }
+    else if (it->type == stAACLATM)
+    {
+      stream = new cTSStream(stAACLATM, it->pID, &m_PtsWrap);
+      stream->SetLanguage(it->language);
+    }
+    else if (it->type == stAC3)
+    {
+      stream = new cTSStream(stAC3, it->pID, &m_PtsWrap);
+      stream->SetLanguage(it->language);
+    }
+    else if (it->type == stEAC3)
+    {
+      stream = new cTSStream(stEAC3, it->pID, &m_PtsWrap);
+      stream->SetLanguage(it->language);
+    }
+    else if (it->type == stDVBSUB)
+    {
+      stream = new cTSStream(stDVBSUB, it->pID, &m_PtsWrap);
+      stream->SetLanguage(it->language);
+#if APIVERSNUM >= 10709
+      stream->SetSubtitlingDescriptor(it->subtitlingType, it->compositionPageId, it->ancillaryPageId);
+#endif
+    }
+    else if (it->type == stTELETEXT)
+    {
+      stream = new cTSStream(stTELETEXT, it->pID, &m_PtsWrap);
+    }
+    else
+      continue;
+
+    m_Streams.push_back(stream);
+    INFOLOG("Created stream for pid=%i and type=%i", stream->GetPID(), stream->Type());
+    streamChange = true;
+  }
+  m_StreamInfos.clear();
+
+  return streamChange;
+}
+
+void cVNSIDemuxer::SetChannelStreams(const cChannel *channel)
+{
+  sStreamInfo newStream;
+  int index = 0;
+  if (channel->Vpid())
+  {
+    newStream.pID = channel->Vpid();
+#if APIVERSNUM >= 10701
+    if (channel->Vtype() == 0x1B)
+      newStream.type = stH264;
+    else
+#endif
+      newStream.type = stMPEG2VIDEO;
+
+    AddStreamInfo(newStream);
+  }
+
+  const int *DPids = channel->Dpids();
+  index = 0;
+  for ( ; *DPids; DPids++)
+  {
+    if (!FindStream(*DPids))
+    {
+      newStream.pID = *DPids;
+      newStream.type = stAC3;
+#if APIVERSNUM >= 10715
+      if (channel->Dtype(index) == SI::EnhancedAC3DescriptorTag)
+        newStream.type = stEAC3;
+#endif
+      newStream.SetLanguage(channel->Dlang(index));
+      AddStreamInfo(newStream);
+    }
+    index++;
+  }
+
+  const int *APids = channel->Apids();
+  index = 0;
+  for ( ; *APids; APids++)
+  {
+    if (!FindStream(*APids))
+    {
+      newStream.pID = *APids;
+      newStream.type = stMPEG2AUDIO;
+#if APIVERSNUM >= 10715
+      if (channel->Atype(index) == 0x0F)
+        newStream.type = stAACADTS;
+      else if (channel->Atype(index) == 0x11)
+        newStream.type = stAACLATM;
+#endif
+      newStream.SetLanguage(channel->Alang(index));
+      AddStreamInfo(newStream);
+    }
+    index++;
+  }
+
+  const int *SPids = channel->Spids();
+  if (SPids)
+  {
+    index = 0;
+    for ( ; *SPids; SPids++)
+    {
+      if (!FindStream(*SPids))
+      {
+        newStream.pID = *SPids;
+        newStream.type = stDVBSUB;
+        newStream.SetLanguage(channel->Slang(index));
+#if APIVERSNUM >= 10709
+        newStream.subtitlingType = channel->SubtitlingType(index);
+        newStream.compositionPageId = channel->CompositionPageId(index);
+        newStream.ancillaryPageId = channel->AncillaryPageId(index);
+#endif
+        AddStreamInfo(newStream);
+      }
+      index++;
+    }
+  }
+
+  if (channel->Tpid())
+  {
+    newStream.pID = channel->Tpid();
+    newStream.type = stTELETEXT;
+    AddStreamInfo(newStream);
+  }
+}
+
+void cVNSIDemuxer::SetChannelPids(cChannel *channel, cPatPmtParser *patPmtParser)
+{
+  int Apids[MAXAPIDS + 1] = { 0 };
+  int Atypes[MAXAPIDS + 1] = { 0 };
+  int Dpids[MAXDPIDS + 1] = { 0 };
+  int Dtypes[MAXDPIDS + 1] = { 0 };
+  int Spids[MAXSPIDS + 1] = { 0 };
+  char ALangs[MAXAPIDS][MAXLANGCODE2] = { "" };
+  char DLangs[MAXDPIDS][MAXLANGCODE2] = { "" };
+  char SLangs[MAXSPIDS][MAXLANGCODE2] = { "" };
+  int index = 0;
+
+  const int *aPids = patPmtParser->Apids();
+  index = 0;
+  for ( ; *aPids; aPids++)
+  {
+    Apids[index] = patPmtParser->Apid(index);
+    Atypes[index] = patPmtParser->Atype(index);
+    strn0cpy(ALangs[index], patPmtParser->Alang(index), MAXLANGCODE2);
+    index++;
+  }
+
+  const int *dPids = patPmtParser->Dpids();
+  index = 0;
+  for ( ; *dPids; dPids++)
+  {
+    Dpids[index] = patPmtParser->Dpid(index);
+    Dtypes[index] = patPmtParser->Dtype(index);
+    strn0cpy(DLangs[index], patPmtParser->Dlang(index), MAXLANGCODE2);
+    index++;
+  }
+
+  const int *sPids = patPmtParser->Spids();
+  index = 0;
+  for ( ; *sPids; sPids++)
+  {
+    Spids[index] = patPmtParser->Spid(index);
+    strn0cpy(SLangs[index], patPmtParser->Slang(index), MAXLANGCODE2);
+    index++;
+  }
+
+  int Vpid = patPmtParser->Vpid();
+  int Ppid = patPmtParser->Ppid();
+  int VType = patPmtParser->Vtype();
+  int Tpid = m_CurrentChannel.Tpid();
+  channel->SetPids(Vpid, Ppid, VType,
+                   Apids, Atypes, ALangs,
+                   Dpids, Dtypes, DLangs,
+                   Spids, SLangs,
+                   Tpid);
+}
+
+bool cVNSIDemuxer::GetTimeAtPos(off_t *pos, int64_t *time)
+{
+  uint8_t *buf;
+  int len;
+  cTSStream *stream;
+  int ts_pid;
+
+  m_VideoBuffer->SetPos(*pos);
+  ResetParsers();
+  while (len = m_VideoBuffer->Read(&buf, TS_SIZE, m_endTime, m_wrapTime) == TS_SIZE)
+  {
+    ts_pid = TsPid(buf);
+    if (stream = FindStream(ts_pid))
+    {
+      // only consider video or audio streams
+      if ((stream->Content() == scVIDEO || stream->Content() == scAUDIO) &&
+          stream->ReadTime(buf, time))
+      {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+uint16_t cVNSIDemuxer::GetError()
+{
+  uint16_t ret = m_Error;
+  m_Error = ERROR_DEMUX_NODATA;
+  return ret;
+}
+

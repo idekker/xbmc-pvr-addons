@@ -31,18 +31,17 @@ class MythFile
 {
 public:
   MythFile();
-  MythFile(cmyth_file_t myth_file, MythConnection conn);
+  MythFile(cmyth_file_t myth_file);
 
   bool IsNull() const;
 
   unsigned long long Length();
   void UpdateLength(unsigned long long length);
 
-  int Read(void *buffer, unsigned long length);
+  int Read(void *buffer, unsigned int length);
   long long Seek(long long offset, int whence);
   unsigned long long Position();
 
 private:
   boost::shared_ptr<MythPointer<cmyth_file_t> > m_file_t;
-  MythConnection m_conn;
 };

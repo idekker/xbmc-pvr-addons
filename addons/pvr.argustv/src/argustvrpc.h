@@ -21,9 +21,9 @@
 #include <json/json.h>
 #include <cstdlib>
 
-#define ATV_2_0_1 (52)
-#define ATV_REST_MINIMUM_API_VERSION ATV_2_0_1
-#define ATV_REST_MAXIMUM_API_VERSION ATV_2_0_1
+#define ATV_2_2_0 (60)
+#define ATV_REST_MINIMUM_API_VERSION ATV_2_2_0
+#define ATV_REST_MAXIMUM_API_VERSION ATV_2_2_0
 
 #define E_SUCCESS 0
 #define E_FAILED -1
@@ -81,6 +81,14 @@ namespace ArgusTV
     IsScrambled = 4,
     UnknownError = 98,
     NotSupported = 99
+  };
+
+  enum ServiceEventGroups {
+    SystemEvents = 0x01,
+    GuideEvents = 0x02,
+    ScheduleEvents = 0x04,
+    RecordingEvents = 0x08,
+    AllEvents = 0x0F
   };
 
   /**
@@ -195,11 +203,11 @@ namespace ArgusTV
   int GetRecordingGroupByTitle(Json::Value& response);
 
   /**
-   * \brief Fetch the data for all recordings for a given title
+   * \brief Fetch the detailed data for all recordings for a given title
    * \param title Program title of recording
    * \param response Reference to a std::string used to store the json response string
    */
-  int GetRecordingsForTitle(const std::string& title, Json::Value& response);
+  int GetFullRecordingsForTitle(const std::string& title, Json::Value& response);
 
   /**
    * \brief Fetch the detailed information of a recorded show
@@ -289,6 +297,11 @@ namespace ArgusTV
   int CancelUpcomingProgram(const std::string& scheduleid, const std::string& channelid, const time_t starttime, const std::string& upcomingprogramid);
 
   /**
+   * \brief Retrieve an empty schedule from the server
+   */
+  int GetEmptySchedule(Json::Value& response);
+
+  /**
    * \brief Add a xbmc timer as a one time schedule
    */
   int AddOneTimeSchedule(const std::string& channelid, const time_t starttime, const std::string& title, int prerecordseconds, int postrecordseconds, int lifetime, Json::Value& response);
@@ -313,7 +326,7 @@ namespace ArgusTV
    */
   int RequestTVChannelGroups(Json::Value& response);
 
-    /*
+  /*
    * \brief Get the list with Radio channel groups from 4TR
    */
   int RequestRadioChannelGroups(Json::Value& response);
@@ -331,6 +344,21 @@ namespace ArgusTV
   std::string GetChannelLogo(const std::string& channelGUID);
 
   /*
+   * \brief Subscribe to ARGUS TV service events
+   */
+  int SubscribeServiceEvents(int eventGroups, Json::Value& response);
+
+  /*
+   * \brief Unsubscribe from ARGUS TV service events
+   */
+  int UnsubscribeServiceEvents(const std::string& monitorId);
+
+  /*
+   * \brief Retrieve the ARGUS TV service events
+   */
+  int GetServiceEvents(const std::string& monitorId, Json::Value& response);
+
+  /*
    * \brief Convert a XBMC Lifetime value to the 4TR keepUntilMode setting
    * \param lifetime the XBMC lifetime value (in days) 
    */
@@ -344,6 +372,4 @@ namespace ArgusTV
 
   time_t WCFDateToTimeT(const std::string& wcfdate, int& offset);
   std::string TimeTToWCFDate(const time_t thetime);
-  std::string ToCIFS(std::string& UNCName);
-  std::string ToUNC(std::string& CIFSName);
 } //namespace ArgusTV

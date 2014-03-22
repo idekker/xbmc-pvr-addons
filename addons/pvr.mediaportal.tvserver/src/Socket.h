@@ -79,22 +79,14 @@ using namespace std;
 
 enum SocketFamily
 {
-  #ifdef CONFIG_SOCKET_IPV6
-    af_inet6  = AF_INET6,
-    af_unspec = AF_UNSPEC,    ///< Either INET or INET6
-  #endif
   af_inet = AF_INET
 };
 
 enum SocketDomain
 {
-  #if defined TARGET_LINUX || defined TARGET_DARWIN
+  #if defined TARGET_LINUX || defined TARGET_DARWIN || defined TARGET_FREEBSD
     pf_unix  = PF_UNIX,
     pf_local = PF_LOCAL,
-  #endif
-  #ifdef CONFIG_SOCKET_IPV6
-    pf_inet6  = PF_INET6,
-    pf_unspec = PF_UNSPEC,    //< Either INET or INET6
   #endif
   pf_inet = PF_INET
 };
@@ -109,9 +101,6 @@ enum SocketProtocol
 {
   tcp = IPPROTO_TCP,
   udp = IPPROTO_UDP
-  #ifdef CONFIG_SOCKET_IPV6
-    , ipv6 = IPPROTO_IPV6
-  #endif
 };
 
 class Socket
@@ -273,16 +262,15 @@ class Socket
      *
      * \param data    Pointer to a character array of size buffersize. Used to store the received data.
      * \param buffersize    Size of the 'data' buffer
-     * \param minpacketsize    Do not return before at least 'minpacketsize' bytes are in the buffer.
      * \param from        Optional: pointer to a sockaddr struct that will get the address from which the data is received
      * \param fromlen    Optional, only required if 'from' is given: length of from struct
      * \return    Number of bytes received or SOCKET_ERROR
      */
-    int recvfrom ( char* data, const int buffersize, const int minpacketsize, struct sockaddr* from = NULL, socklen_t* fromlen = NULL) const;
+    int recvfrom ( char* data, const int buffersize, struct sockaddr* from = NULL, socklen_t* fromlen = NULL) const;
 
     bool set_non_blocking ( const bool );
 
-    bool ReadResponse (int &code, vector<string> &lines);
+    bool ReadLine (string& line);
 
     bool is_valid() const;
 

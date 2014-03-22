@@ -19,6 +19,8 @@
  *
  */
 
+#include "MythTimestamp.h"
+
 #include "platform/util/StdString.h"
 
 #include <boost/shared_ptr.hpp>
@@ -39,14 +41,26 @@ public:
   MythProgramInfo();
   MythProgramInfo(cmyth_proginfo_t cmyth_proginfo);
 
-  bool IsNull() const;
+  /**
+   * \brief Returns internal Unique Identifier for recording
+   *
+   * Make recording UID like "1001 2011-12-10T12:00:00Z" based on 'channelid'
+   * and 'recstartts'.
+   * 'channelid' is the myth channel identifier of the RECORDED PROGRAM.
+   * 'recstartts' is the start time of the RECORDED PROGRAM. Do not confuse with
+   * start time of PROGRAM which is time of EPG program.
+   */
+  static CStdString MakeUID(unsigned int chanid, MythTimestamp &ts);
 
-  CStdString StrUID();
-  long long UID();
+  bool IsNull() const;
+  bool operator ==(MythProgramInfo &other);
+  bool operator !=(MythProgramInfo &other);
+
+  CStdString UID() const;
   CStdString ProgramID();
-  CStdString Title(bool subtitleEncoded);
+  CStdString Title();
   CStdString Subtitle();
-  CStdString Path();
+  CStdString BaseName();
   CStdString Description();
   int Duration();
   CStdString Category();
@@ -54,17 +68,34 @@ public:
   time_t EndTime();
   bool IsWatched();
   bool IsDeletePending();
+  bool HasBookmark();
+  bool IsVisible();
+  bool IsLiveTV();
 
-  int ChannelID();
+  unsigned int ChannelID();
   CStdString ChannelName();
 
   RecordStatus Status();
   CStdString RecordingGroup();
-  unsigned long RecordID();
+  unsigned int RecordID();
   time_t RecordingStartTime();
   time_t RecordingEndTime();
   int Priority();
+  CStdString StorageGroup();
+
+  void SetFrameRate(const long long frameRate);
+  long long FrameRate() const;
+
+  CStdString IconPath();
+  CStdString Coverart() const;
+  CStdString Fanart() const;
 
 private:
   boost::shared_ptr<MythPointer<cmyth_proginfo_t> > m_proginfo_t;
+  CStdString m_UID;
+
+  // Cached PVR attributes
+  long long m_frameRate;
+  CStdString m_coverart;
+  CStdString m_fanart;
 };

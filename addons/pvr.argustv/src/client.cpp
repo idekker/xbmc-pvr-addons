@@ -160,7 +160,7 @@ ADDON_STATUS ADDON_Create(void* hdl, void* props)
     SAFE_DELETE(g_client);
     SAFE_DELETE(PVR);
     SAFE_DELETE(XBMC);
-    m_CurStatus = ADDON_STATUS_PERMANENT_FAILURE;
+    m_CurStatus = ADDON_STATUS_LOST_CONNECTION;
   }
   else
   {
@@ -186,14 +186,8 @@ void ADDON_Destroy()
     g_bCreated = false;
   }
 
-  if (PVR)
-  {
-    SAFE_DELETE(PVR);
-  }
-  if (XBMC)
-  {
-    SAFE_DELETE(XBMC);
-  }
+  SAFE_DELETE(PVR);
+  SAFE_DELETE(XBMC);
 
   m_CurStatus = ADDON_STATUS_UNKNOWN;
 }
@@ -291,6 +285,11 @@ void ADDON_FreeSettings()
 
 }
 
+void ADDON_Announce(const char *flag, const char *sender, const char *message, const void *data)
+{
+  (void) flag; (void) sender; (void) message; (void) data;
+}
+
 /***********************************************************
  * PVR Client AddOn specific public library functions
  ***********************************************************/
@@ -305,6 +304,18 @@ const char* GetMininumPVRAPIVersion(void)
 {
   static const char *strMinApiVersion = XBMC_PVR_MIN_API_VERSION;
   return strMinApiVersion;
+}
+
+const char* GetGUIAPIVersion(void)
+{
+  static const char *strGuiApiVersion = XBMC_GUI_API_VERSION;
+  return strGuiApiVersion;
+}
+
+const char* GetMininumGUIAPIVersion(void)
+{
+  static const char *strMinGuiApiVersion = XBMC_GUI_MIN_API_VERSION;
+  return strMinGuiApiVersion;
 }
 
 //-- GetAddonCapabilities -----------------------------------------------------
@@ -378,9 +389,10 @@ PVR_ERROR DialogChannelScan()
   return PVR_ERROR_NOT_IMPLEMENTED;
 }
 
-PVR_ERROR CallMenuHook(const PVR_MENUHOOK &menuhook)
+PVR_ERROR CallMenuHook(const PVR_MENUHOOK &menuhook, const PVR_MENUHOOK_DATA &item)
 {
   NOTUSED(menuhook);
+  NOTUSED(item);
   return PVR_ERROR_NOT_IMPLEMENTED;
 }
 
@@ -633,7 +645,11 @@ DemuxPacket* DemuxRead(void) { return NULL; }
 void DemuxAbort(void) {}
 void DemuxReset(void) {}
 void DemuxFlush(void) {}
+PVR_ERROR GetRecordingEdl(const PVR_RECORDING&, PVR_EDL_ENTRY[], int*) { return PVR_ERROR_NOT_IMPLEMENTED; };
 unsigned int GetChannelSwitchDelay(void) { return 0; }
 bool SeekTime(int,bool,double*) { return false; }
 void SetSpeed(int) {};
+time_t GetPlayingTime() { return 0; }
+time_t GetBufferTimeStart() { return 0; }
+time_t GetBufferTimeEnd() { return 0; }
 } //end extern "C"

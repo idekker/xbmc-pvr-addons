@@ -32,8 +32,8 @@
 #include <cmyth_local.h>
 
 /*
- * cmyth_ringbuf_destroy(cmyth_ringbuf_t rb)
- * 
+ * cmyth_ringbuf_destroy()
+ *
  * Scope: PRIVATE (static)
  *
  * Description
@@ -64,8 +64,8 @@ cmyth_ringbuf_destroy(cmyth_ringbuf_t rb)
 }
 
 /*
- * cmyth_ringbuf_create(void)
- * 
+ * cmyth_ringbuf_create()
+ *
  * Scope: PUBLIC
  *
  * Description
@@ -101,8 +101,8 @@ cmyth_ringbuf_create(void)
 }
 
 /*
- * cmyth_ringbuf_setup(cmyth_recorder_t old_rec)
- * 
+ * cmyth_ringbuf_setup()
+ *
  * Scope: PUBLIC
  *
  * Description
@@ -122,7 +122,7 @@ cmyth_ringbuf_create(void)
 cmyth_recorder_t
 cmyth_ringbuf_setup(cmyth_recorder_t rec)
 {
-	static const char service[]="rbuf://";
+	static const char service[] = "rbuf://";
 	cmyth_recorder_t new_rec = NULL;
 	char *host = NULL;
 	char *port = NULL;
@@ -138,20 +138,19 @@ cmyth_ringbuf_setup(cmyth_recorder_t rec)
 	cmyth_conn_t control;
 
 	if (!rec) {
-		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n",
-			  __FUNCTION__);
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
 		return NULL;
 	}
 
 	control = rec->rec_conn;
 
-	pthread_mutex_lock(&mutex);
+	pthread_mutex_lock(&rec->rec_conn->conn_mutex);
 
 	snprintf(msg, sizeof(msg),
-		 "QUERY_RECORDER %u[]:[]SETUP_RING_BUFFER[]:[]0",
+		 "QUERY_RECORDER %"PRIu32"[]:[]SETUP_RING_BUFFER[]:[]0",
 		 rec->rec_id);
 
-	if ((err=cmyth_send_message(control, msg)) < 0) {
+	if ((err = cmyth_send_message(control, msg)) < 0) {
 		cmyth_dbg(CMYTH_DBG_ERROR,
 			  "%s: cmyth_send_message() failed (%d)\n",
 			  __FUNCTION__, err);
@@ -164,10 +163,10 @@ cmyth_ringbuf_setup(cmyth_recorder_t rec)
 		r = cmyth_rcv_string(control, &err, buf, sizeof(buf)-1, count);
 		count -= r;
 	}
-	r = cmyth_rcv_string(control, &err, url, sizeof(url)-1, count); 
+	r = cmyth_rcv_string(control, &err, url, sizeof(url)-1, count);
 	count -= r;
 
-	if ((r=cmyth_rcv_int64(control, &err, &size, count)) < 0) {
+	if ((r = cmyth_rcv_int64(control, &err, &size, count)) < 0) {
 		cmyth_dbg(CMYTH_DBG_ERROR,
 			  "%s: cmyth_rcv_length() failed (%d)\n",
 			  __FUNCTION__, r);
@@ -175,7 +174,7 @@ cmyth_ringbuf_setup(cmyth_recorder_t rec)
 	}
 	count -= r;
 
-	if ((r=cmyth_rcv_int64(control, &err, &fill, count)) < 0) {
+	if ((r = cmyth_rcv_int64(control, &err, &fill, count)) < 0) {
 		cmyth_dbg(CMYTH_DBG_ERROR,
 			  "%s: cmyth_rcv_length() failed (%d)\n",
 			  __FUNCTION__, r);
@@ -223,7 +222,7 @@ cmyth_ringbuf_setup(cmyth_recorder_t rec)
 	}
 	ref_release(rec);
         new_rec->rec_ring = cmyth_ringbuf_create();
-        
+
 	tmp = *(port - 1);
 	*(port - 1) = '\0';
 	new_rec->rec_ring->ringbuf_hostname = ref_strdup(host);
@@ -237,7 +236,7 @@ cmyth_ringbuf_setup(cmyth_recorder_t rec)
 	new_rec->rec_ring->ringbuf_fill = fill;
 
     out:
-	pthread_mutex_unlock(&mutex);
+	pthread_mutex_unlock(&rec->rec_conn->conn_mutex);
 
 	return new_rec;
 }
@@ -245,27 +244,42 @@ cmyth_ringbuf_setup(cmyth_recorder_t rec)
 char *
 cmyth_ringbuf_pathname(cmyth_recorder_t rec)
 {
-        return ref_hold(rec->rec_ring->ringbuf_url);
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return NULL;
+	}
+
+	return ref_hold(rec->rec_ring->ringbuf_url);
 }
 
 /*
- * cmyth_ringbuf_get_block(cmyth_recorder_t rec, char *buf, unsigned long len)
+ * cmyth_ringbuf_get_block()
+ *
  * Scope: PUBLIC
+ *
  * Description
+ *
  * Read incoming file data off the network into a buffer of length len.
  *
  * Return Value:
- * Sucess: number of bytes read into buf
- * Failure: -1
+ *
+ * Success: number of bytes read into buf
+ *
+ * Failure: an int containing -errno
  */
-int
-cmyth_ringbuf_get_block(cmyth_recorder_t rec, char *buf, unsigned long len)
+int32_t
+cmyth_ringbuf_get_block(cmyth_recorder_t rec, char *buf, int32_t len)
 {
 	struct timeval tv;
 	fd_set fds;
 
-	if (rec == NULL)
-		return -EINVAL;
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return (int32_t) -EINVAL;
+	}
+
+	if(len > rec->rec_ring->conn_data->conn_tcp_rcvbuf)
+		len = rec->rec_ring->conn_data->conn_tcp_rcvbuf;
 
 	tv.tv_sec = 10;
 	tv.tv_usec = 0;
@@ -287,8 +301,11 @@ cmyth_ringbuf_select(cmyth_recorder_t rec, struct timeval *timeout)
 	fd_set fds;
 	int ret;
 	cmyth_socket_t fd;
-	if (rec == NULL)
+
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
 		return -EINVAL;
+	}
 
 	fd = rec->rec_ring->conn_data->conn_fd;
 
@@ -306,8 +323,8 @@ cmyth_ringbuf_select(cmyth_recorder_t rec, struct timeval *timeout)
 }
 
 /*
- * cmyth_ringbuf_request_block(cmyth_ringbuf_t file, unsigned long len)
- * 
+ * cmyth_ringbuf_request_block()
+ *
  * Scope: PUBLIC
  *
  * Description
@@ -321,39 +338,39 @@ cmyth_ringbuf_select(cmyth_recorder_t rec, struct timeval *timeout)
  *
  * Failure: an int containing -errno
  */
-int
-cmyth_ringbuf_request_block(cmyth_recorder_t rec, unsigned long len)
+int32_t
+cmyth_ringbuf_request_block(cmyth_recorder_t rec, int32_t len)
 {
 	int err, count;
 	int r;
-	long c, ret;
+	int ret;
+	int32_t c;
 	char msg[256];
 
 	if (!rec) {
-		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no connection\n",
-			  __FUNCTION__);
-		return -EINVAL;
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return (int32_t) -EINVAL;
 	}
 
-	pthread_mutex_lock(&mutex);
+	pthread_mutex_lock(&rec->rec_conn->conn_mutex);
 
-	if(len > (unsigned int)rec->rec_conn->conn_tcp_rcvbuf)
-		len = (unsigned int)rec->rec_conn->conn_tcp_rcvbuf;
+	if(len > rec->rec_ring->conn_data->conn_tcp_rcvbuf)
+		len = rec->rec_ring->conn_data->conn_tcp_rcvbuf;
 
 	snprintf(msg, sizeof(msg),
-		 "QUERY_RECORDER %u[]:[]REQUEST_BLOCK_RINGBUF[]:[]%ld",
+		 "QUERY_RECORDER %"PRIu32"[]:[]REQUEST_BLOCK_RINGBUF[]:[]%"PRId32,
 		 rec->rec_id, len);
 
-	if ((err = cmyth_send_message(rec->rec_conn, msg)) < 0) {
+	if ((r = cmyth_send_message(rec->rec_conn, msg)) < 0) {
 		cmyth_dbg(CMYTH_DBG_ERROR,
 			  "%s: cmyth_send_message() failed (%d)\n",
-			  __FUNCTION__, err);
-		ret = err;
+			  __FUNCTION__, r);
+		ret = r;
 		goto out;
 	}
 
 	count = cmyth_rcv_length(rec->rec_conn);
-	if ((r=cmyth_rcv_long(rec->rec_conn, &err, &c, count)) < 0) {
+	if ((r = cmyth_rcv_int32(rec->rec_conn, &err, &c, count)) < 0) {
 		cmyth_dbg(CMYTH_DBG_ERROR,
 			  "%s: cmyth_rcv_length() failed (%d)\n",
 			  __FUNCTION__, r);
@@ -365,14 +382,14 @@ cmyth_ringbuf_request_block(cmyth_recorder_t rec, unsigned long len)
 	ret = c;
 
     out:
-	pthread_mutex_unlock(&mutex);
+	pthread_mutex_unlock(&rec->rec_conn->conn_mutex);
 
 	return ret;
 }
 
 /*
- * cmyth_ringbuf_read (cmyth_recorder_t rec, char *buf, unsigned long len)
- * 
+ * cmyth_ringbuf_read ()
+ *
  * Scope: PUBLIC
  *
  * Description
@@ -385,7 +402,8 @@ cmyth_ringbuf_request_block(cmyth_recorder_t rec, unsigned long len)
  *
  * Failure: an int containing -errno
  */
-int cmyth_ringbuf_read(cmyth_recorder_t rec, char *buf, unsigned long len)
+int32_t
+cmyth_ringbuf_read(cmyth_recorder_t rec, char *buf, int32_t len)
 {
 	int err, count;
 	int ret, req, nfds;
@@ -394,17 +412,18 @@ int cmyth_ringbuf_read(cmyth_recorder_t rec, char *buf, unsigned long len)
 	struct timeval tv;
 	fd_set fds;
 
-	if (!rec)
-	{
-		cmyth_dbg (CMYTH_DBG_ERROR, "%s: no connection\n",
-		           __FUNCTION__);
-		return -EINVAL;
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return (int32_t) -EINVAL;
 	}
 
-	pthread_mutex_lock (&mutex);
+	pthread_mutex_lock (&rec->rec_conn->conn_mutex);
+
+	if(len > rec->rec_ring->conn_data->conn_tcp_rcvbuf)
+		len = rec->rec_ring->conn_data->conn_tcp_rcvbuf;
 
 	snprintf(msg, sizeof(msg),
-		 "QUERY_RECORDER %u[]:[]REQUEST_BLOCK_RINGBUF[]:[]%ld",
+		 "QUERY_RECORDER %"PRIu32"[]:[]REQUEST_BLOCK_RINGBUF[]:[]%"PRId32,
 		 rec->rec_id, len);
 
 	if ( (err = cmyth_send_message (rec->rec_conn, msg) ) < 0)
@@ -464,7 +483,7 @@ int cmyth_ringbuf_read(cmyth_recorder_t rec, char *buf, unsigned long len)
 				goto out;
 			}
 
-			if ((ret = cmyth_rcv_ulong (rec->rec_conn, &err, &len, count))< 0)
+			if ((ret = cmyth_rcv_int32 (rec->rec_conn, &err, &len, count))< 0)
 			{
 				cmyth_dbg (CMYTH_DBG_ERROR,
 				           "%s: cmyth_rcv_long() failed (%d)\n",
@@ -482,7 +501,7 @@ int cmyth_ringbuf_read(cmyth_recorder_t rec, char *buf, unsigned long len)
 		if (FD_ISSET(rec->rec_ring->conn_data->conn_fd, &fds))
 		{
 
-			if ((ret = recv (rec->rec_ring->conn_data->conn_fd, cur, end-cur, 0)) < 0)
+			if ((ret = recv (rec->rec_ring->conn_data->conn_fd, cur, (int32_t)(end - cur), 0)) < 0)
 			{
 				cmyth_dbg (CMYTH_DBG_ERROR,
 				           "%s: recv() failed (%d)\n",
@@ -493,26 +512,25 @@ int cmyth_ringbuf_read(cmyth_recorder_t rec, char *buf, unsigned long len)
 		}
 	}
 
-	ret = end - buf;
+	ret = (int32_t)(cur - buf);
 out:
-	pthread_mutex_unlock (&mutex);
+	pthread_mutex_unlock (&rec->rec_conn->conn_mutex);
 	return ret;
 }
 
 /*
- * cmyth_ringbuf_seek(
- *                    cmyth_ringbuf_t file, long long offset, int whence)
- * 
+ * cmyth_ringbuf_seek()
+ *
  * Scope: PUBLIC
  *
  * Description
  *
  * Seek to a new position in the file based on the value of whence:
- *	SEEK_SET
+ *	WHENCE_SET
  *		The offset is set to offset bytes.
- *	SEEK_CUR
+ *	WHENCE_CUR
  *		The offset is set to the current position plus offset bytes.
- *	SEEK_END
+ *	WHENCE_END
  *		The offset is set to the size of the file minus offset bytes.
  *
  * Return Value:
@@ -521,30 +539,30 @@ out:
  *
  * Failure: an int containing -errno
  */
-long long
+int64_t
 cmyth_ringbuf_seek(cmyth_recorder_t rec,
-		   long long offset, int whence)
+		   int64_t offset, int8_t whence)
 {
 	char msg[128];
 	int err;
-	int count;
-	int64_t c;
-	long r;
-	long long ret;
+	int r, count;
+	int64_t c, ret;
 	cmyth_ringbuf_t ring;
 
-	if (rec == NULL)
-		return -EINVAL;
+	if (!rec) {
+		cmyth_dbg(CMYTH_DBG_ERROR, "%s: no recorder connection\n", __FUNCTION__);
+		return (int64_t) -EINVAL;
+	}
 
 	ring = rec->rec_ring;
 
-	if ((offset == 0) && (whence == SEEK_CUR))
+	if ((offset == 0) && (whence == WHENCE_CUR))
 		return ring->file_pos;
 
-	pthread_mutex_lock(&mutex);
+	pthread_mutex_lock(&rec->rec_conn->conn_mutex);
 
 	snprintf(msg, sizeof(msg),
-		 "QUERY_RECORDER %u[]:[]SEEK_RINGBUF[]:[]%d[]:[]%d[]:[]%d[]:[]%d[]:[]%d",
+		 "QUERY_RECORDER %"PRIu32"[]:[]SEEK_RINGBUF[]:[]%"PRId32"[]:[]%"PRId32"[]:[]%"PRId8"[]:[]%"PRId32"[]:[]%"PRId32,
 		 rec->rec_id,
 		 (int32_t)(offset >> 32),
 		 (int32_t)(offset & 0xffffffff),
@@ -552,16 +570,16 @@ cmyth_ringbuf_seek(cmyth_recorder_t rec,
 		 (int32_t)(ring->file_pos >> 32),
 		 (int32_t)(ring->file_pos & 0xffffffff));
 
-	if ((err = cmyth_send_message(rec->rec_conn, msg)) < 0) {
+	if ((r = cmyth_send_message(rec->rec_conn, msg)) < 0) {
 		cmyth_dbg(CMYTH_DBG_ERROR,
 			  "%s: cmyth_send_message() failed (%d)\n",
-			  __FUNCTION__, err);
-		ret = err;
+			  __FUNCTION__, r);
+		ret = r;
 		goto out;
 	}
 
 	count = cmyth_rcv_length(rec->rec_conn);
-	if ((r=cmyth_rcv_int64(rec->rec_conn, &err, &c, count)) < 0) {
+	if ((r = cmyth_rcv_int64(rec->rec_conn, &err, &c, count)) < 0) {
 		cmyth_dbg(CMYTH_DBG_ERROR,
 			  "%s: cmyth_rcv_length() failed (%d)\n",
 			  __FUNCTION__, r);
@@ -570,13 +588,13 @@ cmyth_ringbuf_seek(cmyth_recorder_t rec,
 	}
 
 	switch (whence) {
-	case SEEK_SET:
+	case WHENCE_SET:
 		ring->file_pos = offset;
 		break;
-	case SEEK_CUR:
+	case WHENCE_CUR:
 		ring->file_pos += offset;
 		break;
-	case SEEK_END:
+	case WHENCE_END:
 		ring->file_pos = ring->file_length - offset;
 		break;
 	}
@@ -584,7 +602,7 @@ cmyth_ringbuf_seek(cmyth_recorder_t rec,
 	ret = ring->file_pos;
 
     out:
-	pthread_mutex_unlock(&mutex);
-	
+	pthread_mutex_unlock(&rec->rec_conn->conn_mutex);
+
 	return ret;
 }

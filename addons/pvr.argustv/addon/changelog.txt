@@ -1,3 +1,34 @@
+v1.9.175 (17-03-2014)
+- Updated language files from Transifex
+v1.9.174 (03-03-2014)
+- Updated language files from Transifex
+v1.9.173 (30-01-2014)
+- added service events monitor
+v1.9.172 (23-12-2013)
+- base new timers on templates retrieved from ARGUS TV server
+v1.9.171 (11-12-2013)
+- removed redundant notification
+v1.9.170 (28-09-2013)
+- add timeshift buffer functions
+v1.8.170 (23-10-2013)
+- Fixes deleting of recordings (regression)
+- Improves load time of recordings
+v1.8.169 (28-09-2013)
+- Fixes playing recordings on Windows
+- Migrated all UNC share name handling to single method
+v1.8.168 (12-09-2013)
+- Minimum ARGUS TV version 2.1 required
+- Switched to integer ID's
+v1.8.167 (29-08-2013)
+- Fixed Live-TV XBMC Gotham
+v1.8.166 (08-06-2013)
+- sync with PVR API v1.8.0
+v1.7.166 (13-03-2013)
+- Fixed error when adding timers with " in their title
+v1.7.165 (07-03-2013)
+- Bump after PVR API version bump
+v1.6.165 (19-01-2013)
+- Do not disable the add-on when it can not connect to the ARGUS-TV server.
 v1.6.164 (18-01-2013)
 - EPG genre will contain the ARGUS TV "Category" string.
 v1.6.163 (01-01-2013)

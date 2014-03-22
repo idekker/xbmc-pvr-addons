@@ -23,13 +23,11 @@
 
 MythChannel::MythChannel()
   : m_channel_t()
-  , m_radio(false)
 {
 }
 
-MythChannel::MythChannel(cmyth_channel_t cmyth_channel, bool isRadio)
+MythChannel::MythChannel(cmyth_channel_t cmyth_channel)
   : m_channel_t(new MythPointer<cmyth_channel_t>())
-  , m_radio(isRadio)
 {
   *m_channel_t = cmyth_channel;
 }
@@ -41,7 +39,7 @@ bool MythChannel::IsNull() const
   return *m_channel_t == NULL;
 }
 
-int MythChannel::ID()
+unsigned int MythChannel::ID()
 {
   return cmyth_channel_chanid(*m_channel_t);
 }
@@ -54,15 +52,17 @@ CStdString MythChannel::Name()
   return retval;
 }
 
-int MythChannel::NumberInt()
+unsigned int MythChannel::NumberInt()
 {
   return cmyth_channel_channum(*m_channel_t);
 }
 
 CStdString MythChannel::Number()
 {
-  // Must not be deleted
-  return CStdString(cmyth_channel_channumstr(*m_channel_t));
+  char *cChanNum = cmyth_channel_channumstr(*m_channel_t);
+  CStdString retval(cChanNum);
+  ref_release(cChanNum);
+  return retval;
 }
 
 CStdString MythChannel::Callsign()
@@ -86,17 +86,17 @@ bool MythChannel::Visible()
   return cmyth_channel_visible(*m_channel_t) > 0;
 }
 
-bool MythChannel::IsRadio() const
+bool MythChannel::IsRadio()
 {
-  return m_radio;
+  return cmyth_channel_radio(*m_channel_t) > 0;
 }
 
-int MythChannel::SourceID()
+unsigned int MythChannel::SourceID()
 {
   return cmyth_channel_sourceid(*m_channel_t);
 }
 
-int MythChannel::MultiplexID()
+unsigned int MythChannel::MultiplexID()
 {
   return cmyth_channel_multiplex(*m_channel_t);
 }
