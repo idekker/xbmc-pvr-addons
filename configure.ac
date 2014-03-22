@@ -297,6 +297,5 @@ AC_CONFIG_FILES([Makefile \
                  addons/pvr.aminopvr/addon/addon.xml
                  addons/pvr.wmc/addon/addon.xml
                  addons/pvr.iptvsimple/addon/addon.xml])
->>>>>>> upstream/frodo
 
 AC_OUTPUT
