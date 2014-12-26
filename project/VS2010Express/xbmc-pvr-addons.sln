@@ -1,6 +1,6 @@
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Express 2013 for Windows Desktop
-VisualStudioVersion = 12.0.21005.1
+VisualStudioVersion = 12.0.31101.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "platform", "platform\platform.vcxproj", "{FE4573F6-A794-4AD3-B37F-49E51F1140E6}"
 EndProject
@@ -229,8 +229,16 @@ Global
 		{8D24D95E-3C4E-4DC5-ABEF-C35C938C2EBB}.RelWithDebInfo|x64.ActiveCfg = Release|Win32
 		{3A2EE05B-D23F-480A-A73D-52650C7A55D7}.Debug|Win32.ActiveCfg = Debug|Win32
 		{3A2EE05B-D23F-480A-A73D-52650C7A55D7}.Debug|Win32.Build.0 = Debug|Win32
+		{3A2EE05B-D23F-480A-A73D-52650C7A55D7}.Debug|x64.ActiveCfg = Debug|Win32
+		{3A2EE05B-D23F-480A-A73D-52650C7A55D7}.MinSizeRel|Win32.ActiveCfg = Release|Win32
+		{3A2EE05B-D23F-480A-A73D-52650C7A55D7}.MinSizeRel|Win32.Build.0 = Release|Win32
+		{3A2EE05B-D23F-480A-A73D-52650C7A55D7}.MinSizeRel|x64.ActiveCfg = Release|Win32
 		{3A2EE05B-D23F-480A-A73D-52650C7A55D7}.Release|Win32.ActiveCfg = Release|Win32
 		{3A2EE05B-D23F-480A-A73D-52650C7A55D7}.Release|Win32.Build.0 = Release|Win32
+		{3A2EE05B-D23F-480A-A73D-52650C7A55D7}.Release|x64.ActiveCfg = Release|Win32
+		{3A2EE05B-D23F-480A-A73D-52650C7A55D7}.RelWithDebInfo|Win32.ActiveCfg = Release|Win32
+		{3A2EE05B-D23F-480A-A73D-52650C7A55D7}.RelWithDebInfo|Win32.Build.0 = Release|Win32
+		{3A2EE05B-D23F-480A-A73D-52650C7A55D7}.RelWithDebInfo|x64.ActiveCfg = Release|Win32
 		{6C67B057-CE98-4732-AABF-0E374C718815}.Debug|Win32.ActiveCfg = Debug|Win32
 		{6C67B057-CE98-4732-AABF-0E374C718815}.Debug|Win32.Build.0 = Debug|Win32
 		{6C67B057-CE98-4732-AABF-0E374C718815}.Debug|x64.ActiveCfg = Debug|Win32
