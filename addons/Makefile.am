@@ -17,6 +17,7 @@ SUBDIRS = pvr.argustv \
           pvr.njoy \
           pvr.vdr.vnsi \
           pvr.vuplus \
+          pvr.aminopvr \
           pvr.wmc \
           $(ADDON_FILMON_SUBDIRS) \
           $(ADDON_IPTVSIMPLE_SUBDIRS) \

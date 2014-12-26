@@ -1,4 +1,3 @@
-﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Express 2013 for Windows Desktop
 VisualStudioVersion = 12.0.21005.1
@@ -35,6 +34,11 @@ EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "pvr.dvbviewer", "..\..\addons\pvr.dvbviewer\project\VS2010Express\pvr.dvbviewer.vcxproj", "{D31D6BEB-0285-47CF-9817-F8AD2CFDF0E8}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "pvr.argustv", "..\..\addons\pvr.argustv\project\VS2010Express\pvr.argustv.vcxproj", "{8D24D95E-3C4E-4DC5-ABEF-C35C938C2EBB}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "pvr.aminopvr", "..\..\addons\pvr.aminopvr\project\VS2010Express\pvr.aminopvr.vcxproj", "{3A2EE05B-D23F-480A-A73D-52650C7A55D7}"
+	ProjectSection(ProjectDependencies) = postProject
+		{F3A72A50-E295-49BA-ACD7-8696907E0351} = {F3A72A50-E295-49BA-ACD7-8696907E0351}
+	EndProjectSection
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "pvr.iptvsimple", "..\..\addons\pvr.iptvsimple\project\VS2010Express\pvr.iptvsimple.vcxproj", "{6C67B057-CE98-4732-AABF-0E374C718815}"
 EndProject
@@ -223,6 +227,10 @@ Global
 		{8D24D95E-3C4E-4DC5-ABEF-C35C938C2EBB}.RelWithDebInfo|Win32.ActiveCfg = Release|Win32
 		{8D24D95E-3C4E-4DC5-ABEF-C35C938C2EBB}.RelWithDebInfo|Win32.Build.0 = Release|Win32
 		{8D24D95E-3C4E-4DC5-ABEF-C35C938C2EBB}.RelWithDebInfo|x64.ActiveCfg = Release|Win32
+		{3A2EE05B-D23F-480A-A73D-52650C7A55D7}.Debug|Win32.ActiveCfg = Debug|Win32
+		{3A2EE05B-D23F-480A-A73D-52650C7A55D7}.Debug|Win32.Build.0 = Debug|Win32
+		{3A2EE05B-D23F-480A-A73D-52650C7A55D7}.Release|Win32.ActiveCfg = Release|Win32
+		{3A2EE05B-D23F-480A-A73D-52650C7A55D7}.Release|Win32.Build.0 = Release|Win32
 		{6C67B057-CE98-4732-AABF-0E374C718815}.Debug|Win32.ActiveCfg = Debug|Win32
 		{6C67B057-CE98-4732-AABF-0E374C718815}.Debug|Win32.Build.0 = Debug|Win32
 		{6C67B057-CE98-4732-AABF-0E374C718815}.Debug|x64.ActiveCfg = Debug|Win32
