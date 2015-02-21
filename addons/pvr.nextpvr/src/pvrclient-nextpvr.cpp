@@ -34,6 +34,8 @@
 
 #if defined(TARGET_WINDOWS)
   #define atoll(S) _atoi64(S) 
+#else
+  #define MAXINT64 ULONG_MAX
 #endif 
 
 
@@ -124,6 +126,7 @@ cPVRClientNextPVR::cPVRClientNextPVR()
 
   m_pLiveShiftSource       = NULL;
 
+  m_lastRecordingUpdateTime = MAXINT64;	// time of last recording check - force forever
   m_incomingStreamBuffer.Create(188*2000);
 }
 
@@ -267,6 +270,44 @@ void cPVRClientNextPVR::Disconnect()
  */
 bool cPVRClientNextPVR::IsUp()
 {
+	// check time since last time Recordings were updated, update if it has been awhile
+	if (m_bConnected == true && m_lastRecordingUpdateTime != MAXINT64 &&  time(0) > (m_lastRecordingUpdateTime + 60 ))
+	{
+		TiXmlDocument doc;
+		char request[512];
+		sprintf(request, "/service?method=recording.lastupdated");
+		CStdString response;
+		if (DoRequest(request, response) == HTTP_OK)
+		{
+			if (doc.Parse(response) != NULL)
+			{
+				TiXmlElement* last_update = doc.RootElement()->FirstChildElement("last_update");
+				if (last_update != NULL)
+				{
+					int64_t update_time = atoll(last_update->GetText());
+					if (update_time > m_lastRecordingUpdateTime)
+					{
+						m_lastRecordingUpdateTime = MAXINT64;
+						PVR->TriggerRecordingUpdate();
+						PVR->TriggerTimerUpdate();
+					}
+					else
+					{						
+						m_lastRecordingUpdateTime = time(0);
+					}
+				}
+				else
+				{
+					m_lastRecordingUpdateTime = MAXINT64;
+				}
+			}
+		}
+		else
+		{
+			m_lastRecordingUpdateTime = MAXINT64;
+			XBMC->Log(LOG_NOTICE, "Disabling recording update.  Update NextPVR to v3.4");
+		}
+	}
   return m_bConnected;
 }
 
@@ -382,7 +423,11 @@ PVR_ERROR cPVRClientNextPVR::GetEpg(ADDON_HANDLE handle, const PVR_CHANNEL &chan
         broadcast.startTime           = atol(start);
         broadcast.endTime             = atol(end);        
         broadcast.strPlot             = description;
-        broadcast.strIconPath         = "";
+
+        // artwork URL 
+        char artworkPath[128];
+        snprintf(artworkPath, sizeof(artworkPath), "/service?method=channel.show.artwork&sid=%s&event_id=%d", m_sid, broadcast.iUniqueBroadcastId);
+        broadcast.strIconPath         = artworkPath;
 
         char genre[128];
         genre[0] = '\0';
@@ -546,6 +591,12 @@ PVR_ERROR cPVRClientNextPVR::GetChannels(ADDON_HANDLE handle, bool bRadio)
         memset(&tag, 0, sizeof(PVR_CHANNEL));
         tag.iUniqueId = atoi(pChannelNode->FirstChildElement("id")->FirstChild()->Value());
         tag.iChannelNumber = atoi(pChannelNode->FirstChildElement("number")->FirstChild()->Value());
+
+        // handle major.minor style subchannels
+        if (pChannelNode->FirstChildElement("minor"))
+        {
+          tag.iSubChannelNumber = atoi(pChannelNode->FirstChildElement("minor")->FirstChild()->Value());
+        }
 
         PVR_STRCPY(tag.strChannelName, pChannelNode->FirstChildElement("name")->FirstChild()->Value());
 
@@ -744,6 +795,14 @@ PVR_ERROR cPVRClientNextPVR::GetRecordings(ADDON_HANDLE handle)
         {
           tag.iLastPlayedPosition = atoi(pRecordingNode->FirstChildElement("playback_position")->FirstChild()->Value());
         }
+		
+		char artworkPath[512];
+		snprintf(artworkPath, sizeof(artworkPath), "http://%s:%d/service?method=recording.artwork&sid=%s&recording_id=%s", g_szHostname.c_str(), g_iPort, m_sid, tag.strRecordingId);
+		PVR_STRCPY(tag.strIconPath, artworkPath);
+		PVR_STRCPY(tag.strThumbnailPath, artworkPath);
+
+		snprintf(artworkPath, sizeof(artworkPath), "http://%s:%d/service?method=recording.fanart&sid=%s&recording_id=%s", g_szHostname.c_str(), g_iPort, m_sid, tag.strRecordingId);
+		PVR_STRCPY(tag.strFanartPath, artworkPath);
 
         CStdString strStream;
         strStream.Format("http://%s:%d/live?recording=%s", g_szHostname, g_iPort, tag.strRecordingId);
@@ -753,6 +812,7 @@ PVR_ERROR cPVRClientNextPVR::GetRecordings(ADDON_HANDLE handle)
         PVR->TransferRecordingEntry(handle, &tag);
       }
     }
+	XBMC->Log(LOG_DEBUG, "Updated recordings %lld", m_lastRecordingUpdateTime);
   }
 
   // ...and any in-progress recordings
@@ -792,7 +852,7 @@ PVR_ERROR cPVRClientNextPVR::GetRecordings(ADDON_HANDLE handle)
       }
     }
   }
-  
+  m_lastRecordingUpdateTime = time(0);
   return PVR_ERROR_NO_ERROR;
 }
 
@@ -844,6 +904,7 @@ PVR_ERROR cPVRClientNextPVR::SetRecordingLastPlayedPosition(const PVR_RECORDING 
       XBMC->Log(LOG_DEBUG, "SetRecordingLastPlayedPosition failed");
       return PVR_ERROR_FAILED;
     }
+	PVR->TriggerRecordingUpdate();
   }
   return PVR_ERROR_NO_ERROR;
 }
@@ -1210,11 +1271,18 @@ bool cPVRClientNextPVR::OpenLiveStream(const PVR_CHANNEL &channelinfo)
       delete m_pLiveShiftSource;
       m_pLiveShiftSource = NULL;
     }
-  
+  	
+	char mode[32];
+	memset(mode, 0, sizeof(mode));
+	if (channelinfo.bIsRadio == false && m_supportsLiveTimeshift && g_bUseTimeshift)
+		strcpy(mode, "&mode=liveshift");
+
     char line[256];
-    sprintf(line, "GET /live?channel=%d&client=XBMC-%s HTTP/1.0\r\n", channelinfo.iChannelNumber, m_sid); 
-    if (m_supportsLiveTimeshift && g_bUseTimeshift)
-      sprintf(line, "GET /live?channel=%d&mode=liveshift&client=XBMC-%s HTTP/1.0\r\n", channelinfo.iChannelNumber, m_sid); 
+	if (channelinfo.iSubChannelNumber == 0)
+		sprintf(line, "GET /live?channel=%d%s&client=XBMC-%s HTTP/1.0\r\n", channelinfo.iChannelNumber, mode, m_sid);
+	else
+		sprintf(line, "GET /live?channel=%d.%d%s&client=XBMC-%s HTTP/1.0\r\n", channelinfo.iChannelNumber, channelinfo.iSubChannelNumber, mode, m_sid);
+
     m_streamingclient->send(line, strlen(line));
 
     sprintf(line, "Connection: close\r\n");
